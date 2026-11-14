@@ -206,6 +206,135 @@ def follow(
     _run_pipeline(cfg, duration, report=coach)
 
 
+@app.command("follow-test")
+def follow_test(
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+    move: bool = typer.Option(True, "--move/--no-move", help="Do the small base test moves (asks first)"),
+    seconds: float = typer.Option(20, help="Length of the camera dry run"),
+) -> None:
+    """Diagnose follow mode: robot base access, a tiny confirmed test move, then a camera dry run that shows
+    what follow WOULD do (distance, bearing, decision) without moving the base."""
+    import math
+    import time
+
+    _setup_logging(False)
+    cfg = _cfg(config, sets)
+    from .robot import StretchHead, wait_for_tilt
+
+    typer.echo("1) Opening the robot in base mode (stretch_body Robot)...")
+    try:
+        head = StretchHead(dict(cfg["robot"], enabled=True), base=True)
+    except Exception as e:
+        typer.echo(f"   FAIL: {e}")
+        typer.echo("   -> Is ROS/another program using the robot? Run: stretch_free_robot_process.py")
+        raise typer.Exit(1) from None
+    try:
+        wait_for_tilt(head, 3)
+        time.sleep(0.5)
+        typer.echo(
+            f"   base access: {'YES' if head.has_base else 'NO'} | runstop: {head.runstop} | "
+            f"head pan {head.pan} tilt {head.tilt} | odometry x={head.base_x} theta={head.base_theta}"
+        )
+        if head.runstop:
+            typer.echo(
+                "   The RUNSTOP is active (the glowing button on the head): press it to release, then retry."
+            )
+            raise typer.Exit(1)
+        if (
+            move
+            and head.has_base
+            and typer.confirm(
+                "2) Test the base: turn ~10 deg left and back, then 5 cm forward and back. Area clear?",
+                default=False,
+            )
+        ):
+
+            def odo():
+                time.sleep(0.3)
+                return head.base_x, head.base_theta
+
+            x0, t0 = odo()
+            head.base_rotate(math.radians(10), compensate_head=False)
+            time.sleep(2.5)
+            x1, t1 = odo()
+            head.base_rotate(math.radians(-10), compensate_head=False)
+            time.sleep(2.5)
+            head.base_translate(0.05)
+            time.sleep(2.0)
+            x2, _ = odo()
+            head.base_translate(-0.05)
+            time.sleep(2.0)
+            if None not in (t0, t1, x1, x2):
+                typer.echo(
+                    f"   rotation measured {math.degrees(t1 - t0):+.1f} deg (expected +10), "
+                    f"translation {100 * (x2 - x1):+.1f} cm (expected +5)"
+                )
+                ok = abs(math.degrees(t1 - t0)) > 3 and abs(x2 - x1) > 0.01
+                typer.echo(
+                    "   base moves: OK" if ok else "   base did NOT move: check runstop / battery / motors"
+                )
+            else:
+                typer.echo("   (no odometry reported; did you see it move?)")
+
+        typer.echo(
+            f"3) Camera dry run for {seconds:.0f} s: stand 1-5 m away and walk around (base will NOT move)."
+        )
+        from .camera import open_source
+        from .follow import Follower, person_distance
+        from .pipeline import _torso_target, make_estimator
+
+        class DryHead:  # real head pan/runstop, recorded (not executed) base commands
+            has_base = True
+
+            def __init__(self, real):
+                self.real, self.last = real, ""
+
+            pan = property(lambda self: self.real.pan)
+            runstop = property(lambda self: self.real.runstop)
+
+            def base_rotate(self, rad, compensate_head=True):
+                self.last = f"WOULD TURN {math.degrees(rad):+.0f} deg"
+
+            def base_translate(self, m):
+                self.last = f"WOULD DRIVE {100 * m:+.0f} cm"
+
+        dry = DryHead(head)
+        fol = Follower(dict(cfg["follow"], enabled=True), cfg["robot"], dry)
+        try:
+            src = open_source(cfg["camera"])
+            est = make_estimator(cfg)
+        except Exception as e:
+            typer.echo(f"   camera/pose unavailable: {e}")
+            raise typer.Exit(1) from None
+        min_vis = float(cfg["pose"].get("min_visibility", 0.5))
+        end, last_print = time.monotonic() + seconds, 0.0
+        try:
+            while time.monotonic() < end:
+                frame, ts = src.read()
+                if frame is None:
+                    continue
+                pose = est.process(frame, ts)
+                target = _torso_target(pose, min_vis)
+                head.track(target, ts)
+                dist, dsrc = person_distance(
+                    pose, getattr(src, "last_depth", None), min_vis, float(cfg["robot"].get("vfov_deg", 69))
+                )
+                st = fol.update(target is not None, dist, dsrc, target[0] if target else None, ts)
+                if ts - last_print > 0.5:
+                    last_print = ts
+                    d = "-" if st.distance is None else f"{st.distance:.2f} m ({st.source})"
+                    b = "-" if st.bearing_deg is None else f"{st.bearing_deg:+.0f} deg"
+                    typer.echo(f"   distance {d:<16} bearing {b:<9} -> {st.action:<9} {st.note} {dry.last}")
+                    dry.last = ""
+        finally:
+            src.close()
+            est.close()
+        typer.echo("Done. If it says WOULD TURN/DRIVE here, `posture-coach follow` will move the base.")
+    finally:
+        head.close()
+
+
 @app.command("norteno-setup")
 def norteno_setup(
     base: str = typer.Option(

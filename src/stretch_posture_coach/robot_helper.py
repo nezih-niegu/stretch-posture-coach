@@ -101,7 +101,13 @@ class WholeRobot:
 
     def status(self):
         # the Robot's own threads keep head status fresh; don't pull from here (not thread-safe)
-        return {"pan": self.head.status["head_pan"]["pos"], "tilt": self.head.status["head_tilt"]["pos"]}
+        out = {"pan": self.head.status["head_pan"]["pos"], "tilt": self.head.status["head_tilt"]["pos"]}
+        try:  # base odometry, for `posture-coach follow-test`
+            b = self.robot.base.status
+            out["base_x"], out["base_theta"] = b.get("x"), b.get("theta")
+        except Exception:
+            pass
+        return out
 
     def runstop(self):
         try:

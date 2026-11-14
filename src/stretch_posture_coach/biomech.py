@@ -168,6 +168,13 @@ def compute_metrics(
     hip_mid = p.mid("l_hip", "r_hip")
     ear_mid = p.mid("l_ear", "r_ear") if p.ok("l_ear", "r_ear") else p["nose"]
 
+    # ---- fall-detection features (computed first: the body frame below degenerates when lying) ----
+    m["trunk_inclination"] = angle_between(sh_mid - hip_mid, up)  # 0 upright, 90 lying
+    m["hand_raised"] = any(
+        p.ok(f"{s}_wrist", f"{s}_shoulder") and float(np.dot(p[f"{s}_wrist"] - p[f"{s}_shoulder"], up)) > 0.15
+        for s in ("l", "r")
+    )
+
     # ---- body frame: U (up), F (forward), L (person's left) ----
     lateral = (p["l_hip"] - p["r_hip"]) + (p["l_shoulder"] - p["r_shoulder"])
     fwd = unit(horizontal(np.cross(lateral, up), up))

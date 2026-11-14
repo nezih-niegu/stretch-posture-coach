@@ -12,10 +12,12 @@ from pathlib import Path
 import numpy as np
 
 from . import biomech
+from .alarm import Alarm
 from .assessment import Assessor
 from .biomech import Calibration, Subject, compute_metrics, gravity_from_pitch
 from .camera import Intrinsics, open_source
 from .coach import Coach
+from .fall import ALARM, CHECK, IMPACT, OK, FallDetector, features_from, hip_height_from_depth
 from .follow import Follower, person_distance
 from .llm import OllamaClient, OllamaError
 from .logger import SessionLogger
@@ -140,6 +142,8 @@ class Pipeline:
                 self.follower._p("max_m", 3.0),
             )
         self.follow_state = None
+        if not want_follow:
+            log.info("Follow mode OFF: the base will not move (use --follow, or set follow.enabled: true)")
         self.speaker = speaker if speaker is not None else Speaker(cfg["speech"])
         self.llm = make_llm(cfg) if llm == "auto" else llm
         self.subject = subject_from_cfg(cfg)
@@ -152,6 +156,15 @@ class Pipeline:
             )
         self.coach = Coach(
             cfg, self.speaker, self.llm, on_event=self._on_event, issues=self.assessor.issues.values()
+        )
+        self.fall = FallDetector(cfg.get("fall", {}))
+        self._fall_ack: str | None = None  # set from the web/VR threads
+        self.alarm = Alarm(
+            cfg.get("alarm", {}),
+            self.speaker,
+            self.coach.templates,
+            live_url=f"http://{_host_ip()}:{cfg['display'].get('stream_port', 8080)}/",
+            snapshot_dir=self.logger.dir if self.logger else None,
         )
         self.window = _want_window(cfg) if window is None else window
         sessions_dir = cfg["logging"].get("sessions_dir", "sessions")
@@ -187,6 +200,10 @@ class Pipeline:
                 log.info("Live view: http://%s:%d/", _host_ip(), self.streamer.port)
             except OSError as e:
                 log.warning("Could not start web viewer: %s", e)
+        for srv in (self.streamer, self.vr):  # fall alarm: "I'm OK" buttons + snapshot
+            if srv is not None:
+                srv.on_ack = self.request_fall_ack
+                srv.snapshot_provider = lambda: self.alarm.snapshot
         self.fps = 0.0
         self.frames = 0
         self.last_assessment = None
@@ -208,7 +225,14 @@ class Pipeline:
                 self.min_vis,
             )
         a = self.assessor.update(raw, ts)
-        self.coach.update(a, ts)
+        depth = getattr(self.source, "last_depth", None)
+        h_img, w_img = frame.shape[:2]
+        intr = getattr(self.source, "intrinsics", None) or Intrinsics.from_fov(
+            w_img, h_img, float(self.cfg.get("vr", {}).get("fallback_hfov_deg", 60))
+        )
+        self._update_fall(frame, pose, raw, depth, intr, ts)
+        if not self.fall.active:  # no posture coaching while checking on / alarming about a fall
+            self.coach.update(a, ts)
         target = _torso_target(pose, self.min_vis) if a.present else None
         forward_pan = float(self.cfg.get("follow", {}).get("forward_pan_rad", 0.0))
         look = self.vr.look_target() if self.vr else None
@@ -222,25 +246,36 @@ class Pipeline:
             self.head.look(forward_pan + yaw - self.follower.theta, pitch, ts)
         else:
             self.head.track(target, ts)
-        depth = getattr(self.source, "last_depth", None)
         dist, src = person_distance(
             pose if a.present else None,
             depth,
             self.min_vis,
             float(self.cfg["robot"].get("vfov_deg", 69)),
         )
-        if self.vr_control:  # never drive the base while someone is immersed in VR
+        if self.vr_control or self.fall.active:  # never drive while someone is in VR or may have fallen
             fs = self.follower.state
-            fs.distance, fs.source, fs.action, fs.note = dist, src, "paused", "VR head control"
+            fs.distance, fs.source, fs.action = dist, src, "paused"
+            fs.note = "fall check / alarm" if self.fall.active else "VR head control"
         else:
             fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
         self.follow_state = fs
+        if self.follower.enabled:
+            key = (fs.action, fs.note.split(" (")[0] if fs.action == "hold" else fs.note)
+            if key != getattr(
+                self, "_last_follow_key", None
+            ):  # log every change of decision, with the reason
+                self._last_follow_key = key
+                dist_txt = "-" if fs.distance is None else f"{fs.distance:.2f} m ({fs.source})"
+                log.info(
+                    "follow: %-8s %s | distance %s | bearing %s deg",
+                    fs.action,
+                    fs.note,
+                    dist_txt,
+                    "-" if fs.bearing_deg is None else f"{fs.bearing_deg:+.0f}",
+                )
         if self.vr is not None and self.vr.n_clients:
             pan = self.head.pan
             h, w = frame.shape[:2]
-            intr = getattr(self.source, "intrinsics", None) or Intrinsics.from_fov(
-                w, h, float(self.cfg.get("vr", {}).get("fallback_hfov_deg", 60))
-            )
             hud = {**self._summary(a), "vr_control": self.vr_control}
             self.vr.publish(
                 frame,
@@ -391,6 +426,7 @@ class Pipeline:
     def close(self):
         import cv2
 
+        self.alarm.stop("session ended")
         for fn in (self.speaker.close, self.head.close, self.source.close, self.estimator.close):
             try:
                 fn()
@@ -402,6 +438,80 @@ class Pipeline:
             self.logger.close()
         if self.window:
             cv2.destroyAllWindows()
+
+    # ------------------------------------------------------------------ fall detection
+    def request_fall_ack(self, who: str) -> None:
+        """Called from the web/VR server threads ("I'm OK" / caregiver acknowledged)."""
+        self._fall_ack = who
+
+    def _update_fall(self, frame, pose, raw, depth, intr, ts) -> None:
+        if not self.fall.enabled:
+            return
+        present = bool(raw and raw.get("torso_visible"))
+        hip_h = None
+        if present and depth is not None:
+            hip_h = hip_height_from_depth(
+                pose,
+                depth,
+                intr,
+                _gravity(self.head, self.cfg),
+                float(self.cfg["camera"].get("height_m", 1.3)),
+                self.min_vis,
+            )
+        change = self.fall.update(features_from(ts, present, pose, raw, hip_h, self.min_vis))
+        if self._fall_ack:
+            who, self._fall_ack = self._fall_ack, None
+            change = self.fall.acknowledge(ts, who) or change
+        if change:
+            self._on_fall_change(*change, frame=frame, present=present, ts=ts)
+        self._publish_alarm()
+
+    def _on_fall_change(self, state: str, reason: str, frame, present: bool, ts: float) -> None:
+        t = self.coach.templates
+        text = ""
+        if state == IMPACT:
+            log.info("fall? rapid descent: %s", reason)
+        elif state == CHECK:
+            text = t.get("fall_check", "")
+            self.speaker.say(text)
+            self.alarm.save_snapshot(frame, "check")
+            if not present and self.head.tilt is not None:  # look down where they were
+                self.head.look(self.head.pan or 0.0, max(-1.2, self.head.tilt - 0.5), ts)
+            log.warning("FALL CHECK: %s", reason)
+        elif state == ALARM:
+            text = t.get("fall_alarm", "")
+            self.alarm.save_snapshot(frame, "alarm")
+            self.alarm.start(reason)
+        elif state == OK:
+            was_alarm = self.alarm.active
+            self.alarm.stop(reason)
+            if "sat down" not in reason:  # false start (sat down fast): say nothing
+                text = t.get("fall_ok", "")
+                self.speaker.say(text)
+            log.info("fall %s: %s", "alarm cleared" if was_alarm else "check cleared", reason)
+        if self.logger:
+            self.logger.event(
+                {
+                    "kind": "fall",
+                    "state": state,
+                    "reason": reason,
+                    "text": text,
+                    "source": "fall-detector",
+                    "wall_time": time.time(),
+                }
+            )
+
+    def _publish_alarm(self) -> None:
+        st = {
+            "state": self.fall.state,
+            "reason": self.fall.reason,
+            "active": self.fall.active,
+            "siren": self.alarm.active,
+        }
+        if self.streamer:
+            self.streamer.alarm = st
+        if self.vr:
+            self.vr.set_alarm(st)
 
     def show_report(self, report_path: Path | None) -> None:
         """Session over: web viewer and VR page switch to the report."""

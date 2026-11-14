@@ -100,6 +100,10 @@ open-ended velocity commands, and the robot-side helper clamps them again), one 
 stable detections first, backs up at most 1 m in total (**Stretch has no rear sensor**) until it drives
 forward again, and stays within 3 m of where it started.
 
+Check the hardware first with `posture-coach follow-test`. It opens the robot in base mode, asks before a
+tiny test move (10° turn, 5 cm drive, measured with odometry), then shows for 20 s what follow *would* do
+(distance, bearing, decision) while you walk around, without moving the base.
+
 **Before the first run:** clear the floor around the robot, keep the **runstop** (the button on the head)
 within reach, and make sure no ROS driver is running. Check that `forward_pan_rad: 0.0` really is "head looking
 straight over the front of the base" on your robot; if the body turns the wrong way, that value or
@@ -128,6 +132,41 @@ robot at it with `--host`.
 
 To make it permanent, set it in `config.yaml`: `coach.persona: norteno`, `coach.language: Spanish`,
 `llm.model: stretch-norteno`, `speech.piper_voice: es_MX-claude-high`.
+
+## Fall detection and alarm
+
+Always on during `run` / `follow` (`fall.enabled`). A fall needs **two things**: a rapid descent (hips drop
+≥ 0.45 m within 1.2 s on the depth camera, or ≥ 1 torso length in the image when there is no depth, or the
+person vanishes from view while going down), **and** ending up lying (trunk ≥ 55° from vertical, hips low).
+Sitting down fast or bending over to pick something up does not count. Lying on the floor (hips < 0.45 m)
+for 30 s without a seen fall also counts. Lying on a bed or couch doesn't.
+
+1. **Check:** Stretch asks out loud: *"Are you OK? If you're OK, stand up or raise your hand."* The live page
+   and the VR view show an orange banner. Posture coaching and base motion pause.
+2. **Recovery** cancels it: standing/sitting upright for 3 s, a raised hand held 1.5 s, or the
+   **"I'm OK / acknowledge"** button on the web page, the VR page, or the **grip** button in the headset.
+3. **Alarm** after 12 s with no recovery: a loud two-tone **siren** plus a spoken alert through the robot
+   speaker (repeating), a flashing red banner with a **snapshot** on the web page and in VR, a
+   `fall_*.jpg` snapshot saved in the session folder, and **phone notifications** if configured. It stays on until
+   someone acknowledges or the person gets up. Every step is logged and shows up in the session report.
+
+**Phone push (free):** install the **ntfy** app (Android/iOS), subscribe to a hard-to-guess topic name, and set
+it in `config.yaml`:
+
+```yaml
+alarm:
+  ntfy_topic: stretch-casa-7f3k9q      # anyone who knows the name can read it: make it unguessable
+  webhook_url: ""                      # or POST JSON to Home Assistant / Slack / Teams / your server
+```
+
+The notification is urgent priority, and tapping it opens the robot's live view.
+In `config.yaml → fall` you can tune `check_s`, `long_lying_s` (0 = off), `drop_m`, `lying_incl_deg` and
+`camera.height_m` (head camera height, used for hip height). Set `alarm.siren: false` to keep only the
+spoken alert.
+
+> This is a helper, **not a certified medical alert system**. It only sees what the head camera sees, and
+> works best when Stretch is following you (`--follow`). Don't rely on it as the only safety measure for
+> someone at real risk of falling.
 
 ## Session report on the web
 
@@ -233,9 +272,12 @@ camera:  {rotate: cw90}
 | Head turns **away** from you | flip `robot.pan_sign` (or `tilt_sign`) to `+1`. |
 | `head.startup() failed` | the ROS driver is using the motors; free the robot (see above), or run with `--no-robot`. |
 | No sound over SSH | `posture-coach say "test"`. The app sets `XDG_RUNTIME_DIR` for you; also check the volume with `pactl list sinks short` / `alsamixer`, and that a desktop session is logged in. |
+| Follow: the base never moves | Follow is **off by default**: use `posture-coach follow` or `run --follow` (or `follow.enabled: true` in config.yaml). The log prints `follow: <decision> <reason>` on every change. It also pauses while someone controls the head from VR (press A/X in the headset), and when the runstop is pressed. Run `posture-coach follow-test` to check base access, do a tiny test move, and dry-run the camera. |
 | Follow: base turns the wrong way / away from you | check `follow.forward_pan_rad` and `robot.pan_sign`; press the runstop first |
 | Follow: "Follow mode requested but the mobile base is not available" | the ROS driver holds the robot (`stretch_free_robot_process.py`), or `stretch_body` failed to start; see the log |
 | apt/Ollama hang on "Connecting to ..." an IPv6 address | `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1` (until reboot), then for snap Ollama `sudo snap restart ollama` |
+| Fall alarm goes off when lying down on purpose (exercise on the floor) | raise a hand or press "I'm OK" during the check; or raise `fall.long_lying_s` / set it to 0 |
+| No phone notification | set `alarm.ntfy_topic` and subscribe to the same topic in the ntfy app; the robot needs internet access to reach ntfy.sh |
 | Quest: "Enter VR" greyed out | open the page with **https://**…:8443 (not http) and accept the certificate warning |
 | Quest: VR view is black / "connected - waiting for video" | a session must be running (`posture-coach run`); check the robot log for "VR viewer connected" |
 | VR: the wide-angle backdrop is sideways or mirrored | set `vr.nav_rotate` (cw90/ccw90/180) and `vr.nav_hfov_deg`; disable with `vr.nav_camera: false` |
@@ -252,13 +294,13 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 62 tests: geometry, RULA/REBA, load model, follow, personas, web reports, VR server/protocol, end-to-end
+uv run pytest            # 78 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
 uv run ruff check .
 ```
 
 Layout: `src/stretch_posture_coach/` contains `camera.py`, `pose.py`, `biomech.py`, `ergonomics.py`,
 `assessment.py`, `coach.py`, `personas.py`, `follow.py`, `llm.py`, `speech.py`, `robot.py` + `robot_helper.py`, `visualize.py`,
-`stream.py`, `web.py`, `vr.py` + `web/vr.html`/`vr.js` (three.js r187 vendored), `certs.py`, `logger.py`, `report.py`,
+`stream.py`, `web.py`, `vr.py` + `web/vr.html`/`vr.js` (three.js r187 vendored), `certs.py`, `fall.py`, `alarm.py`, `logger.py`, `report.py`,
 `pipeline.py` and `cli.py`.
 
 `robot_helper.py` (head only, or the whole robot with `--base` in follow mode) runs on the robot's **system** Python (`/usr/bin/python3`, which has Hello Robot's

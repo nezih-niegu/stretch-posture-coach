@@ -214,3 +214,20 @@ def test_pipeline_follow_backoff_announces_in_norteno(tmp_path):
     ).run()
     assert head.translations and head.translations[0] < 0
     assert speaker.said and "pa'trás" in speaker.said[0]
+
+
+def test_every_decision_has_a_reason(cfg):
+    f, _ = make(cfg)
+    assert "confirming" in run(f, 2.5, n=2)[0].note
+    assert run(f, 2.5, n=10)[0].note.startswith("in band")
+    assert run(f, None, n=2, present=False)[0].note == "no person in view"
+    off = Follower({**cfg["follow"], "enabled": False}, cfg["robot"], FakeHead())
+    assert off.update(True, 4.0, "depth", 0.5, 1.0).note == "follow mode off"
+
+
+def test_stale_distances_cleared_after_losing_person(cfg):
+    f, head = make(cfg)
+    run(f, 1.0, n=3)  # close readings, not yet stable
+    run(f, None, n=2, present=False)  # lost
+    run(f, 3.6, n=20)  # comes back far away: must approach, not back off on old readings
+    assert head.translations and head.translations[0] > 0

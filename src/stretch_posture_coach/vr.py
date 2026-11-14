@@ -288,6 +288,9 @@ class VRServer:
         self._state = {"type": "state", "state": "running", "report": None}
         self.report_path: Path | None = None
         self._look: dict | None = None
+        self._alarm = {"type": "alarm", "state": "ok", "active": False, "reason": ""}
+        self.on_ack = None  # callable(who): a viewer acknowledged the fall alarm
+        self.snapshot_provider = None  # callable() -> jpeg bytes | None
         self._aux: list[AuxCamera] = []
         self._aux_started = False
         self._running = True
@@ -351,6 +354,13 @@ class VRServer:
         if not lk or not lk.get("active") or time.monotonic() - lk["t"] > max_age_s:
             return None
         return float(lk["yaw"]), float(lk["pitch"])
+
+    def set_alarm(self, st: dict) -> None:
+        """Fall-detector state; pushed to viewers only when it changes."""
+        new = {"type": "alarm", **st}
+        if new != self._alarm:
+            self._alarm = new
+            self.loop.call_soon_threadsafe(self._wake_all)
 
     def set_ended(self, report_path: Path | None) -> None:
         self.report_path = report_path
@@ -505,6 +515,13 @@ class VRServer:
         path = request.path.split("?", 1)[0]
         if path == "/ws":
             return None  # proceed with the WebSocket handshake
+        if path == "/alarm/snapshot.jpg":
+            snap = self.snapshot_provider() if self.snapshot_provider else None
+            return (
+                self._response(200, "image/jpeg", snap)
+                if snap
+                else self._response(404, "text/plain", b"none")
+            )
         if path == "/favicon.ico":
             return self._response(204, "image/x-icon", b"")
         if path in ("/", "/index.html"):
@@ -540,7 +557,10 @@ class VRServer:
                         m = json.loads(msg)
                     except ValueError:
                         continue
-                    if m.get("type") == "ack":
+                    if m.get("type") == "alarm_ack":
+                        if self.on_ack:
+                            self.on_ack("VR viewer")
+                    elif m.get("type") == "ack":
                         q = client.in_flight.get(int(m.get("t", 0)), [])
                         if q:
                             client.rtt_ms = 0.8 * client.rtt_ms + 0.2 * (time.monotonic() - q.pop(0)) * 1000
@@ -570,6 +590,9 @@ class VRServer:
                 if client.sent.get("state") != self._state:
                     await conn.send(json.dumps(self._state))
                     client.sent["state"] = dict(self._state)
+                if client.sent.get("alarm") != self._alarm:
+                    await conn.send(json.dumps(self._alarm))
+                    client.sent["alarm"] = dict(self._alarm)
                 now = time.monotonic()
                 for t, pkt in list(self._packets.items()):
                     if client.sent.get(t) is pkt:

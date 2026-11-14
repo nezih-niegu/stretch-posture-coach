@@ -106,6 +106,9 @@ FALLBACK_EN = {
     "greet": "Hi{name}! I'm {robot}. I'll keep an eye on your posture and let you know if anything needs adjusting.",
     "follow_back": "I'm backing up a little to give you some space.",
     "follow_limit": "I can't back up any further. Could you step back a little, please?",
+    "fall_check": "Are you okay? If you're okay, stand up or raise your hand. Otherwise I'll call for help.",
+    "fall_alarm": "Alert! A fall has been detected. Calling for help. Stay calm, help is on the way.",
+    "fall_ok": "Phew, I'm glad you're okay.",
 }
 FALLBACK_ES = {
     "neck_flexion": "Levanta un poco la cabeza. Lleva la barbilla hacia atrás para que tus orejas queden sobre tus hombros.",
@@ -125,6 +128,9 @@ FALLBACK_ES = {
     "greet": "¡Hola{name}! Soy {robot}. Voy a cuidar tu postura y te aviso si algo necesita ajuste.",
     "follow_back": "Me hago un poco hacia atrás para darte espacio.",
     "follow_limit": "Ya no puedo retroceder más. ¿Te alejas un poquito, por favor?",
+    "fall_check": "¿Estás bien? Si estás bien, ponte de pie o levanta la mano. Si no, voy a pedir ayuda.",
+    "fall_alarm": "¡Alerta! Se detectó una caída. Estoy pidiendo ayuda. Mantén la calma, la ayuda viene en camino.",
+    "fall_ok": "¡Qué alivio! Me da gusto que estés bien.",
 }
 FALLBACK_NORTENO = {
     "neck_flexion": "¡Ey, compa, esa cabeza anda bien agachada! Échela pa'trás tantito, que las orejas queden arribita de los hombros.",
@@ -150,6 +156,9 @@ FALLBACK_NORTENO = {
     "greet": "¡Qué onda{name}! Aquí su compa {robot}. Yo le cuido la postura, y si anda chueco, le aviso, ¿eh?",
     "follow_back": "Dame chance, compa, me hago pa'trás tantito pa' darte espacio.",
     "follow_limit": "Ya no me puedo hacer más pa'trás, compa. Hazte tantito pa'llá, ¿sí?",
+    "fall_check": "¡Compa! ¿Estás bien? Si estás bien, párate o levanta la mano. Si no, ahorita pido ayuda.",
+    "fall_alarm": "¡Alerta, alerta! Se cayó el compa. Ya estoy pidiendo ayuda. Aguanta, ya viene la ayuda.",
+    "fall_ok": "¡Uf, qué susto me diste, compa! Qué bueno que estás bien.",
 }
 
 

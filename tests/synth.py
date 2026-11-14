@@ -26,6 +26,8 @@ def skeleton(
     trunk_side=0.0,
     camera_pitch_deg=0.0,
     abduct=0.0,
+    drop=0.0,
+    hand_up=False,
 ) -> PoseResult:
     """Build 33 world landmarks. Body frame (f, l, u), mapped into an upright camera frame.
 
@@ -72,6 +74,10 @@ def skeleton(
             put(kn, 0, lat, -0.45)
             put(an, 0, lat, -0.9)
 
+    if hand_up:  # left arm straight up
+        pts[13] = pts[11] + [0, 0, 0.3]
+        pts[15] = pts[13] + [0, 0, 0.25]
+    pts[:, 2] -= drop  # whole body lower (e.g. on the floor)
     if view == "front":
         F, L, U = np.array([0, 0, -1.0]), np.array([1.0, 0, 0]), np.array([0, -1.0, 0])
     else:

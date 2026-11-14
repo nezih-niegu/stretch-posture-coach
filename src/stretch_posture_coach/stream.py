@@ -23,15 +23,27 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Stretch Postur
 <style>body{background:#151515;color:#ddd;font-family:system-ui,sans-serif;margin:0;padding:16px}
 img{max-width:100%;max-height:85vh;border-radius:8px}pre{font-size:12px;white-space:pre-wrap}
 .row{display:flex;gap:16px;flex-wrap:wrap}.col{flex:1;min-width:280px}a{color:#7fb2f0}
-.bar{display:flex;gap:18px;align-items:baseline}</style></head>
-<body><div class="bar"><h3>Stretch Posture Coach</h3><a href="/sessions">Past sessions</a>__VR__</div>
+.bar{display:flex;gap:18px;align-items:baseline}
+#alarm{display:none;position:sticky;top:0;z-index:5;padding:16px 20px;border-radius:10px;margin-bottom:12px;
+ background:#d03b3b;color:#fff;font-size:20px;animation:blink 1s steps(2,start) infinite}
+#alarm.check{background:#c77700;animation:none}#alarm button{font-size:20px;padding:10px 18px;margin-left:16px;
+ border:0;border-radius:8px;background:#fff;color:#900;font-weight:700}#alarm img{max-height:160px;float:right;border-radius:6px}
+@keyframes blink{to{background:#7a1010}}</style></head>
+<body><div id="alarm"><img id="snap" alt=""><b id="atitle"></b> <span id="areason"></span>
+<button onclick="fetch('/alarm/ack',{method:'POST'})">I'm OK / acknowledge</button></div><div class="bar"><h3>Stretch Posture Coach</h3><a href="/sessions">Past sessions</a>__VR__</div>
 <div class="row"><div><img id="live" src="/stream"></div>
 <div class="col"><h4>Live metrics</h4><pre id="m">waiting...</pre></div></div>
 <script>
 setInterval(async()=>{try{const r=await fetch('/metrics');document.getElementById('m').textContent=
 JSON.stringify(await r.json(),null,1)}catch(e){}},1000);
 setInterval(async()=>{try{const s=await (await fetch('/state')).json();
- if(s.state==='ended'&&s.report){location.href=s.report}}catch(e){}},1500);
+ const a=s.alarm||{}, box=document.getElementById('alarm');
+ if(a.active){box.style.display='block';box.className=a.state==='alarm'?'':'check';
+  document.getElementById('atitle').textContent=a.state==='alarm'?'FALL ALARM':'Possible fall - checking…';
+  document.getElementById('areason').textContent=a.reason||'';
+  document.getElementById('snap').src='/alarm/snapshot.jpg?'+Date.now();}
+ else{box.style.display='none'}
+ if(s.state==='ended'&&s.report){location.href=s.report}}catch(e){}},1000);
 </script></body></html>"""
 
 
@@ -51,6 +63,9 @@ class FrameStreamer:
         self._cond = threading.Condition()
         self._ended = False
         self.report_path: Path | None = None
+        self.alarm: dict = {}  # fall-detector state, set by the pipeline
+        self.on_ack = None  # callable(who) - "I'm OK" / acknowledge button
+        self.snapshot_provider = None  # callable() -> jpeg bytes | None
         vr_link = (
             (
                 f' <a id="vr" href="#">VR view (Quest)</a><script>document.getElementById("vr").href='
@@ -81,10 +96,17 @@ class FrameStreamer:
                     st = {
                         "state": "ended" if streamer._ended else "running",
                         "report": "/report" if streamer.report_path else None,
+                        "alarm": streamer.alarm,
                     }
                     self._send(200, "application/json", json.dumps(st).encode())
                 elif path.startswith("/stream"):
                     self._mjpeg()
+                elif path == "/alarm/snapshot.jpg":
+                    snap = streamer.snapshot_provider() if streamer.snapshot_provider else None
+                    if snap:
+                        self._send(200, "image/jpeg", snap)
+                    else:
+                        self._send(404, "text/plain", b"no snapshot")
                 else:
                     res = web.route(
                         path, streamer.sessions_dir, streamer.report_path, '<a href="/">Live view</a>'
@@ -93,6 +115,13 @@ class FrameStreamer:
                         self._send(404, "text/plain", b"not found")
                     else:
                         self._send(*res)
+
+            def do_POST(self):
+                if self.path.split("?", 1)[0] == "/alarm/ack" and streamer.on_ack:
+                    streamer.on_ack("web")
+                    self._send(200, "application/json", b'{"ok":true}')
+                else:
+                    self._send(404, "text/plain", b"not found")
 
             def _mjpeg(self):
                 self.send_response(200)

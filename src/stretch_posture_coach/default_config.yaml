@@ -10,6 +10,7 @@ camera:
   height: 480
   fps: 30
   rotate: cw90             # Stretch head camera is mounted sideways. cw90 | ccw90 | 180 | none
+  height_m: 1.3            # head camera height above the floor (fall detection hip height, VR floor)
   pitch_deg: 0.0           # camera pitch (down = negative) used for gravity when robot head tilt is unavailable
   depth: true              # RealSense depth (aligned to color) -> distance to the person for follow mode
 
@@ -122,6 +123,33 @@ display:
   stream_port: 8080
   jpeg_quality: 75
   serve_report: true       # after the session, keep the web server up showing the report (Ctrl+C to quit)
+
+# Fall detection: rapid descent + ending up lying -> Stretch asks "are you OK?" -> alarm if no recovery.
+fall:
+  enabled: true
+  drop_m: 0.45             # hips drop this much (depth camera)...
+  drop_window_s: 1.2       # ...within this time
+  descent_torso_lengths: 1.0  # or hips move down this many torso lengths in the image (no depth needed)
+  lying_incl_deg: 55       # trunk this far from vertical = lying (0 upright, 90 horizontal)
+  lying_hip_m: 0.65        # and hips below this height (when depth is available)
+  upright_incl_deg: 35     # recovery: trunk back within this of vertical...
+  upright_hip_m: 0.45      # ...with hips above this
+  settle_s: 3.0            # after a rapid descent, time to end up lying (else: just sat down)
+  check_s: 12              # "are you OK?" window before the alarm
+  recover_s: 3             # upright this long = OK
+  hand_raise_ok: true      # raising a hand during the check = "I'm OK"
+  hand_ok_s: 1.5
+  floor_height_m: 0.45     # lying with hips below this = on the floor
+  long_lying_s: 30         # on the floor this long, even without a seen fall -> check (0 = off)
+
+alarm:
+  siren: true              # loud two-tone siren through the robot speaker
+  volume: 1.5              # paplay volume (1.0 = 100 %)
+  repeat_s: 4              # pause between siren + spoken alert cycles
+  max_duration_s: 600      # stop the siren after this (the alarm stays visible on the web/VR)
+  ntfy_topic: ""           # phone push: install the ntfy app, subscribe to a hard-to-guess topic, put it here
+  ntfy_server: https://ntfy.sh
+  webhook_url: ""          # optional: POST JSON {event, reason, time, live_url} here (Slack/Teams/Home Assistant...)
 
 # VR telepresence for the Meta Quest browser: https://<robot>:8443/  (accept the certificate warning once)
 vr:

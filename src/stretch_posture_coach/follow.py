@@ -108,7 +108,7 @@ class Follower:
         s = self.state
         s.distance, s.source = distance, source
         if not self.enabled:
-            s.action = "idle"
+            s.action, s.note = "idle", "follow mode off"
             return s
         if getattr(self.head, "runstop", None):
             s.action, s.note = "runstop", "runstop pressed"
@@ -116,7 +116,9 @@ class Follower:
             return s
         if not present or distance is None:
             self._stable = 0
+            self._dist_hist.clear()  # don't decide on stale readings when the person comes back
             s.action = "lost"
+            s.note = "no person in view" if not present else "no distance (no depth on the torso)"
             s.bearing_deg = None
             return s
         self._last_seen = now
@@ -127,10 +129,15 @@ class Follower:
         s.distance = round(d, 2)
         b = self.bearing(target_x)
         s.bearing_deg = None if b is None else round(math.degrees(b), 1)
-        if b is None or self._stable < int(self._p("stable_frames", 6)):
-            s.action = "hold"
+        if b is None:
+            s.action, s.note = "hold", "no head pan reading from the robot"
+            return s
+        need = int(self._p("stable_frames", 6))
+        if self._stable < need:
+            s.action, s.note = "hold", f"confirming detection {self._stable}/{need}"
             return s
         if now < self._busy_until:
+            s.note = "step in progress"
             return s  # previous step still executing
 
         min_m, max_m, target = self._p("min_m", 2.0), self._p("max_m", 3.0), self._p("target_m", 2.5)
@@ -183,7 +190,12 @@ class Follower:
                 s.action, s.note = "approach", f"{step:.2f} m"
                 return s
 
-        s.action, s.note = "hold", ""
+        s.action = "hold"
+        s.note = (
+            f"in band ({d:.2f} m, {math.degrees(b):+.0f} deg)"
+            if min_m <= d <= max_m
+            else f"{d:.2f} m but {math.degrees(b):+.0f} deg off-center"
+        )
         return s
 
     def _within_travel(self, dx: float) -> bool:

@@ -24,7 +24,16 @@ def test_resolve():
 
 
 def test_every_persona_has_all_fallbacks():
-    ids = {r.id for r in RULES} | {"break", "praise", "greet", "follow_back", "follow_limit"}
+    ids = {r.id for r in RULES} | {
+        "break",
+        "praise",
+        "greet",
+        "follow_back",
+        "follow_limit",
+        "fall_check",
+        "fall_alarm",
+        "fall_ok",
+    }
     for p in personas.PERSONAS.values():
         assert ids <= set(p.fallback), p.key
     assert set(personas.LABELS_ES) == {r.id for r in RULES}

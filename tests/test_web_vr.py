@@ -71,7 +71,7 @@ def test_viewer_report_routes(tmp_path):
         assert json.loads(get(base + "/state")[2])["state"] == "running"
         s.set_ended(sess / "report.html")
         st = json.loads(get(base + "/state")[2])
-        assert st == {"state": "ended", "report": "/report"}
+        assert st["state"] == "ended" and st["report"] == "/report"
         code, _, body = get(base + "/")  # redirected to the report
         assert code == 200 and b"Posture session" in body
     finally:
@@ -150,6 +150,8 @@ def test_vr_websocket_protocol(vr):
                 )
                 try:
                     msg = await asyncio.wait_for(ws.recv(), 0.5)
+                    if isinstance(msg, str):  # alarm-state text message
+                        continue
                     break
                 except TimeoutError:
                     continue
@@ -176,7 +178,7 @@ def test_vr_websocket_protocol(vr):
             vr.set_ended(None)
             while True:
                 m = await asyncio.wait_for(ws.recv(), 5)
-                if isinstance(m, str):
+                if isinstance(m, str) and json.loads(m)["type"] == "state":
                     assert json.loads(m) == {"type": "state", "state": "ended", "report": "/sessions"}
                     break
 
@@ -316,7 +318,7 @@ def test_session_end_serves_report_on_both_servers(tmp_path):
     p.show_report(report)
     try:
         st = json.loads(get(f"http://127.0.0.1:{p.streamer.port}/state")[2])
-        assert st == {"state": "ended", "report": "/report"}
+        assert st["state"] == "ended" and st["report"] == "/report" and st["alarm"]["state"] == "ok"
         code, _, body = get(f"http://127.0.0.1:{p.streamer.port}/report")
         assert code == 200 and session.name.encode() in body
         code, _, body = get(f"https://127.0.0.1:{p.vr.port}/report", _ctx())

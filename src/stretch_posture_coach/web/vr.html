@@ -12,6 +12,10 @@
   #msg{font-size:15px;opacity:.9;max-width:60ch}
   a{color:#7fb2f0;font-size:15px}
   #help{position:fixed;bottom:10px;left:12px;font-size:13px;opacity:.6}
+  #alarm{display:none;position:fixed;top:70px;left:12px;right:12px;z-index:3;padding:16px;border-radius:10px;
+    background:#d03b3b;color:#fff;font-size:20px}
+  #alarm.check{background:#c77700}
+  #alarm button{margin-left:14px;background:#fff;color:#900;font-weight:700}
 </style>
 <script type="importmap">{"imports": {"three": "/vendor/three.module.js"}}</script>
 </head>
@@ -21,8 +25,10 @@
   <span id="msg">connecting…</span>
   <a href="/sessions" target="_blank">Reports</a>
 </div>
+<div id="alarm"><b id="atitle"></b> <span id="areason"></span>
+  <button id="ack">I'm OK / acknowledge</button></div>
 <div id="help">Drag to look around. In VR: trigger = recenter the live view in front of you ·
-  A/X = robot head follows your head on/off · B/Y = scene memory on/off</div>
+  A/X = robot head follows your head on/off · B/Y = scene memory on/off · grip = acknowledge a fall alarm</div>
 <script type="module" src="/vr.js"></script>
 </body>
 </html>

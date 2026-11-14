@@ -274,7 +274,7 @@ function ensureNav(meta) {
   world.add(nav);
 }
 
-let state = { headControl: true, lastHud: {}, fps: 0, latency: 0, connected: false };
+let state = { headControl: true, lastHud: {}, fps: 0, latency: 0, connected: false, alarm: { active: false } };
 function wrap(ctx, text, x, y, maxW, lh, maxLines) {
   const words = String(text).split(' ');
   let line = '', n = 0;
@@ -324,6 +324,16 @@ function drawHud() {
   ctx.fillStyle = '#9aa0aa'; ctx.font = '24px system-ui';
   ctx.fillText(`A/X head follows you: ${state.headControl ? 'ON' : 'off'} · B/Y memory: ${memoryOn ? 'ON' : 'off'} · trigger: recenter`,
     32, canvas.height - 24);
+  const al = state.alarm;
+  if (al.active) {  // flashing fall banner on top of everything
+    const on = Math.floor(performance.now() / 500) % 2 === 0 || al.state !== 'alarm';
+    ctx.fillStyle = al.state === 'alarm' ? (on ? '#d03b3b' : '#7a1010') : '#c77700';
+    ctx.fillRect(0, 0, canvas.width, 150);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 46px system-ui';
+    ctx.fillText(al.state === 'alarm' ? 'FALL ALARM' : 'Possible fall - checking', 32, 60);
+    ctx.font = '26px system-ui';
+    wrap(ctx, `${al.reason || ''} · squeeze grip = I'm OK`, 32, 104, canvas.width - 64, 32, 2);
+  }
   hud.tex.needsUpdate = true;
 }
 setInterval(drawHud, 250);
@@ -345,7 +355,29 @@ function connect() {
   };
 }
 
+function ackAlarm() {
+  if (ws && ws.readyState === 1 && state.alarm.active) ws.send(JSON.stringify({ type: 'alarm_ack' }));
+}
+$('ack').onclick = ackAlarm;
+
+function onAlarm(a) {
+  state.alarm = a;
+  const box = $('alarm');
+  box.style.display = a.active ? 'block' : 'none';
+  box.className = a.state === 'alarm' ? '' : 'check';
+  $('atitle').textContent = a.state === 'alarm' ? 'FALL ALARM' : 'Possible fall - checking…';
+  $('areason').textContent = a.reason || '';
+  if (a.active) {
+    hud.mesh.position.set(0, -0.15, -0.9);   // bring the HUD to the middle of the view while alarming
+    hud.mesh.lookAt(0, 0, 0);
+  } else {
+    hud.mesh.position.set(0.62, -0.38, -1.05);
+    hud.mesh.lookAt(0, 0, 0);
+  }
+}
+
 function onState(s) {
+  if (s.type === 'alarm') return onAlarm(s);
   if (s.type === 'state' && s.state === 'ended') {
     msg('Session ended - opening the report…');
     const go = () => { location.href = s.report || '/sessions'; };
@@ -445,7 +477,10 @@ function pollGamepads() {
     prevButtons.set(src, gp.buttons.map((b) => b.pressed));
   }
 }
-for (const i of [0, 1]) renderer.xr.getController(i).addEventListener('selectstart', recenter);
+for (const i of [0, 1]) {
+  renderer.xr.getController(i).addEventListener('selectstart', recenter);
+  renderer.xr.getController(i).addEventListener('squeezestart', ackAlarm);
+}
 
 renderer.xr.addEventListener('sessionstart', () => { setTimeout(recenter, 300); });
 renderer.xr.addEventListener('sessionend', () => { sendLook(true); });

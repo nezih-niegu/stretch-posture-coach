@@ -78,6 +78,8 @@ class StretchHead:
         self._tilt: float | None = None
         self.runstop: bool | None = None
         self.has_base = False
+        self.base_x: float | None = None
+        self.base_theta: float | None = None
         self._ready = threading.Event()
         self.error: str | None = None
         self._stderr: collections.deque[str] = collections.deque(maxlen=20)
@@ -121,6 +123,7 @@ class StretchHead:
             else:
                 self._pan, self._tilt = msg.get("pan"), msg.get("tilt")
                 self.runstop = msg.get("runstop")
+                self.base_x, self.base_theta = msg.get("base_x"), msg.get("base_theta")
 
     def _send(self, obj: dict):
         if self._proc.poll() is not None or self._proc.stdin is None:
