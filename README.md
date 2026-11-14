@@ -108,7 +108,7 @@ straight over the front of the base" on your robot; if the body turns the wrong 
 `robot.pan_sign` is off. Start with `posture-coach follow`, walk slowly, and watch the distance in the web
 viewer.
 
-## En español / norteño de la sierra
+## En español 
 
 ```bash
 posture-coach norteno-setup                 # once: custom Ollama model "stretch-norteno" + Mexican voice
