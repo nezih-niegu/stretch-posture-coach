@@ -129,6 +129,53 @@ robot at it with `--host`.
 To make it permanent, set it in `config.yaml`: `coach.persona: norteno`, `coach.language: Spanish`,
 `llm.model: stretch-norteno`, `speech.piper_voice: es_MX-claude-high`.
 
+## Session report on the web
+
+When you stop a session (Ctrl+C), the report is written and **the live page switches to it automatically**:
+`http://<robot-ip>:8080/report`. The server stays up until you press Ctrl+C a second time. All past
+sessions are listed at `/sessions`. Each report includes time in RULA/REBA risk bands, % time over each limit,
+charts (neck/trunk flexion, L5/S1 load, RULA/REBA, distance to Stretch) and a transcript of **what Stretch
+said and why**. To browse reports later without starting a session, run `posture-coach serve`.
+
+## VR telepresence (Meta Quest 3/3S browser)
+
+While a session runs (`posture-coach run`, `posture-coach follow`, ...), a second web service streams the robot's
+cameras for VR:
+
+1. Put the Quest on the same Wi-Fi as the robot and open the **Meta Quest Browser**.
+2. Go to **`https://<robot-ip>:8443/`**. The robot prints the exact URL at start-up.
+3. The first time you'll see "Your connection is not private". Tap **Advanced → Proceed**. The robot uses a
+   self-signed certificate because WebXR only works over https.
+4. Tap **Enter VR**.
+
+How it is made immersive:
+
+* **Real 3-D, not flat video.** The head D435i streams color + aligned depth. The headset rebuilds a textured
+  3-D surface of the room on its GPU and renders it per eye, so you get **true stereo and parallax when you
+  move your head**, at the Quest's 72-120 Hz, no matter how fast the Wi-Fi is.
+* **Your head drives Stretch's head.** Look left/right/up/down and the robot head follows (A/X toggles it).
+  Each frame is placed with the head pose it was captured at, so the world stays still while the robot catches
+  up. Lag shows up as the image arriving a moment later, not as the world swimming (the main cause of VR
+  sickness).
+* **Scene memory.** Areas the robot has looked at stay around you as a dimmer layer, so turning your head
+  reveals the room instead of black (B/Y toggles it).
+* **All cameras.** The gripper **D405** appears as a floating screen, the head's **wide-angle navigation camera**
+  is a peripheral backdrop behind the 3-D scene, and your **posture skeleton** is drawn in 3-D, colored by risk
+  (green/yellow/red), with a HUD showing RULA/REBA, distance and Stretch's last message.
+* **Trigger** recenters the live view in front of you. The floor grid sits at the robot's camera height, so you
+  see the room from Stretch's eyes.
+* **Low latency by design.** The headset acknowledges each frame, and the robot never has more than 2 frames in
+  flight, so stale frames are dropped instead of queuing up as lag. The HUD shows the round-trip time.
+* **Safety.** While someone is in VR controlling the head, follow mode **pauses the base**. It never drives
+  while you're immersed.
+
+When the session ends, the headset exits VR and opens the report.
+
+Tuning (`config.yaml → vr`): `fps` (15), `depth_decimation` (4 gives a 120×160 3-D grid), `jpeg_quality`,
+`gripper_camera` / `nav_camera` (`auto`, `false`, or `/dev/videoN`), `nav_hfov_deg`, `nav_rotate`,
+`gripper_rotate`, `camera_height_m`. To turn VR off, use `--no-vr`. Bandwidth is about 1.5 MB/s, so 5 GHz Wi-Fi
+is recommended.
+
 ### Placement
 
 * Stand or sit **2-3 m** from Stretch with your **whole body** in the frame. Head tracking keeps you centered.
@@ -189,6 +236,9 @@ camera:  {rotate: cw90}
 | Follow: base turns the wrong way / away from you | check `follow.forward_pan_rad` and `robot.pan_sign`; press the runstop first |
 | Follow: "Follow mode requested but the mobile base is not available" | the ROS driver holds the robot (`stretch_free_robot_process.py`), or `stretch_body` failed to start; see the log |
 | apt/Ollama hang on "Connecting to ..." an IPv6 address | `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1` (until reboot), then for snap Ollama `sudo snap restart ollama` |
+| Quest: "Enter VR" greyed out | open the page with **https://**…:8443 (not http) and accept the certificate warning |
+| Quest: VR view is black / "connected - waiting for video" | a session must be running (`posture-coach run`); check the robot log for "VR viewer connected" |
+| VR: the wide-angle backdrop is sideways or mirrored | set `vr.nav_rotate` (cw90/ccw90/180) and `vr.nav_hfov_deg`; disable with `vr.nav_camera: false` |
 | Messages are slow | Normal first time (model load). Use `qwen2:0.5b`, or run Ollama on your laptop: `--host http://<laptop-ip>:11434`. On the laptop, start it with `OLLAMA_HOST=0.0.0.0 ollama serve`. |
 | Angles look off | calibrate; prefer a side view; make sure your whole body is visible. |
 
@@ -202,13 +252,14 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 55 tests: geometry, RULA/REBA, load model, follow controller, personas, end-to-end pipeline
+uv run pytest            # 62 tests: geometry, RULA/REBA, load model, follow, personas, web reports, VR server/protocol, end-to-end
 uv run ruff check .
 ```
 
 Layout: `src/stretch_posture_coach/` contains `camera.py`, `pose.py`, `biomech.py`, `ergonomics.py`,
 `assessment.py`, `coach.py`, `personas.py`, `follow.py`, `llm.py`, `speech.py`, `robot.py` + `robot_helper.py`, `visualize.py`,
-`stream.py`, `logger.py`, `report.py`, `pipeline.py` and `cli.py`.
+`stream.py`, `web.py`, `vr.py` + `web/vr.html`/`vr.js` (three.js r187 vendored), `certs.py`, `logger.py`, `report.py`,
+`pipeline.py` and `cli.py`.
 
 `robot_helper.py` (head only, or the whole robot with `--base` in follow mode) runs on the robot's **system** Python (`/usr/bin/python3`, which has Hello Robot's
 `stretch_body`) as a small subprocess, so the uv environment never conflicts with the robot's packages.

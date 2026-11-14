@@ -14,7 +14,7 @@ import numpy as np
 from . import biomech
 from .assessment import Assessor
 from .biomech import Calibration, Subject, compute_metrics, gravity_from_pitch
-from .camera import open_source
+from .camera import Intrinsics, open_source
 from .coach import Coach
 from .follow import Follower, person_distance
 from .llm import OllamaClient, OllamaError
@@ -114,8 +114,11 @@ class Pipeline:
         window: bool | None = None,
         stream: bool | None = None,
         log_session: bool | None = None,
+        vr: bool | None = None,
+        keep_servers: bool = False,
     ):
         self.cfg = cfg
+        self.keep_servers = keep_servers
         self.min_vis = float(cfg["pose"].get("min_visibility", 0.5))
         self.source = source if source is not None else open_source(cfg["camera"])
         self.estimator = estimator if estimator is not None else make_estimator(cfg)
@@ -151,6 +154,23 @@ class Pipeline:
             cfg, self.speaker, self.llm, on_event=self._on_event, issues=self.assessor.issues.values()
         )
         self.window = _want_window(cfg) if window is None else window
+        sessions_dir = cfg["logging"].get("sessions_dir", "sessions")
+        self.vr = None
+        vcfg = cfg.get("vr", {})
+        if vcfg.get("enabled", True) if vr is None else vr:
+            from .vr import VRServer
+
+            try:
+                self.vr = VRServer(vcfg, sessions_dir, vcfg.get("certs_dir", "certs"), cfg["thresholds"])
+                log.info(
+                    "VR view (Meta Quest browser): %s://%s:%d/  (accept the certificate warning once)",
+                    self.vr.scheme,
+                    _host_ip(),
+                    self.vr.port,
+                )
+            except Exception as e:
+                log.warning("Could not start VR server: %s", e)
+        self.vr_control = False
         self.streamer = None
         if cfg["display"].get("stream", True) if stream is None else stream:
             from .stream import FrameStreamer
@@ -158,9 +178,13 @@ class Pipeline:
             try:
                 d = cfg["display"]
                 self.streamer = FrameStreamer(
-                    d.get("stream_host", "0.0.0.0"), d.get("stream_port", 8080), d.get("jpeg_quality", 75)
+                    d.get("stream_host", "0.0.0.0"),
+                    d.get("stream_port", 8080),
+                    d.get("jpeg_quality", 75),
+                    sessions_dir=sessions_dir,
+                    vr_port=self.vr.port if self.vr else None,
                 )
-                log.info("Live view: http://%s:%d/", os.uname().nodename, self.streamer.port)
+                log.info("Live view: http://%s:%d/", _host_ip(), self.streamer.port)
             except OSError as e:
                 log.warning("Could not start web viewer: %s", e)
         self.fps = 0.0
@@ -186,15 +210,49 @@ class Pipeline:
         a = self.assessor.update(raw, ts)
         self.coach.update(a, ts)
         target = _torso_target(pose, self.min_vis) if a.present else None
-        self.head.track(target, ts)
+        forward_pan = float(self.cfg.get("follow", {}).get("forward_pan_rad", 0.0))
+        look = self.vr.look_target() if self.vr else None
+        if look is not None and not self.vr_control:
+            log.info("VR head control ON: the robot head follows the headset")
+        elif look is None and self.vr_control:
+            log.info("VR head control OFF: back to tracking the person")
+        self.vr_control = look is not None
+        if self.vr_control:  # telepresence: the robot head looks where the VR viewer looks
+            yaw, pitch = look
+            self.head.look(forward_pan + yaw - self.follower.theta, pitch, ts)
+        else:
+            self.head.track(target, ts)
+        depth = getattr(self.source, "last_depth", None)
         dist, src = person_distance(
             pose if a.present else None,
-            getattr(self.source, "last_depth", None),
+            depth,
             self.min_vis,
             float(self.cfg["robot"].get("vfov_deg", 69)),
         )
-        fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
+        if self.vr_control:  # never drive the base while someone is immersed in VR
+            fs = self.follower.state
+            fs.distance, fs.source, fs.action, fs.note = dist, src, "paused", "VR head control"
+        else:
+            fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
         self.follow_state = fs
+        if self.vr is not None and self.vr.n_clients:
+            pan = self.head.pan
+            h, w = frame.shape[:2]
+            intr = getattr(self.source, "intrinsics", None) or Intrinsics.from_fov(
+                w, h, float(self.cfg.get("vr", {}).get("fallback_hfov_deg", 60))
+            )
+            hud = {**self._summary(a), "vr_control": self.vr_control}
+            self.vr.publish(
+                frame,
+                depth,
+                intr,
+                self.follower.theta + ((pan - forward_pan) if pan is not None else 0.0),
+                self.head.tilt or 0.0,
+                pose if a.present else None,
+                a.metrics,
+                hud,
+                self.min_vis,
+            )
         if self.follower.enabled and self.cfg["follow"].get("announce", True):
             if fs.action == "back_off":
                 self.coach.announce("follow_back", ts)
@@ -338,12 +396,35 @@ class Pipeline:
                 fn()
             except Exception as e:
                 log.debug("close: %s", e)
-        if self.streamer:
-            self.streamer.close()
+        if not self.keep_servers:
+            self.close_servers()
         if self.logger:
             self.logger.close()
         if self.window:
             cv2.destroyAllWindows()
+
+    def show_report(self, report_path: Path | None) -> None:
+        """Session over: web viewer and VR page switch to the report."""
+        if self.streamer:
+            self.streamer.set_ended(report_path)
+        if self.vr:
+            self.vr.set_ended(report_path)
+
+    def close_servers(self) -> None:
+        for srv in (self.streamer, self.vr):
+            if srv is not None:
+                try:
+                    srv.close()
+                except Exception as e:
+                    log.debug("close server: %s", e)
+        self.streamer = self.vr = None
+
+
+def _host_ip() -> str:
+    from .certs import local_ips
+
+    ips = [ip for ip in local_ips() if not ip.startswith("127.")]
+    return ips[0] if ips else os.uname().nodename
 
 
 def calibrate(

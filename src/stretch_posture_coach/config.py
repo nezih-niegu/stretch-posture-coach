@@ -17,6 +17,7 @@ PATH_KEYS = [
     ("speech", "voices_dir"),
     ("logging", "sessions_dir"),
     ("analysis", "calibration_file"),
+    ("vr", "certs_dir"),
 ]
 
 

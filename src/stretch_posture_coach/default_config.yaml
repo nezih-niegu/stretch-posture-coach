@@ -121,6 +121,32 @@ display:
   stream_host: 0.0.0.0
   stream_port: 8080
   jpeg_quality: 75
+  serve_report: true       # after the session, keep the web server up showing the report (Ctrl+C to quit)
+
+# VR telepresence for the Meta Quest browser: https://<robot>:8443/  (accept the certificate warning once)
+vr:
+  enabled: true
+  host: 0.0.0.0
+  port: 8443
+  https: true              # WebXR needs https; a self-signed certificate is generated in certs/
+  certs_dir: certs
+  fps: 15                  # RGB-D frames per second sent to the headset (rendering runs at 72-120 Hz anyway)
+  depth_decimation: 4      # 480x640 color -> 120x160 depth grid (3-D surface resolution)
+  jpeg_quality: 70
+  max_range_m: 6.0
+  camera_height_m: 1.3     # robot head camera height above the floor (draws the floor grid)
+  head_control: true       # in VR the robot head follows your head (toggle with A/X)
+  gripper_camera: auto     # D405 on the gripper as a floating panel (auto | false)
+  gripper_name: D405
+  gripper_rotate: none
+  aux_fps: 10
+  nav_camera: auto         # wide-angle head camera as a peripheral backdrop (auto | /dev/videoN | false)
+  nav_name: "vitade|navigation|wide|arducam"
+  nav_rotate: none
+  nav_hfov_deg: 120
+  nav_vfov_deg: 90
+  nav_width: 800
+  nav_height: 600
 
 logging:
   enabled: true

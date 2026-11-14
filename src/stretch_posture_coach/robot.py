@@ -46,6 +46,9 @@ class NullHead:
     def track(self, target_xy, now: float) -> None:
         pass
 
+    def look(self, pan: float, tilt: float, now: float) -> None:
+        pass
+
     def base_rotate(self, rad: float, compensate_head: bool = True) -> None:
         pass
 
@@ -156,6 +159,17 @@ class StretchHead:
         if dpan or dtilt:
             self._send({"cmd": "move_by", "pan": dpan, "tilt": dtilt})
             self._last_cmd = now
+
+    def look(self, pan: float, tilt: float, now: float) -> None:
+        """Point the head at an absolute pan/tilt (VR telepresence). Rate-limited, with a small deadband."""
+        if now - getattr(self, "_last_look", -1e9) < 0.1:
+            return
+        last = getattr(self, "_last_look_target", None)
+        if last and abs(last[0] - pan) < 0.02 and abs(last[1] - tilt) < 0.02:
+            return
+        tilt = max(-1.3, min(0.4, tilt))
+        self._send({"cmd": "move_to", "pan": pan, "tilt": tilt})
+        self._last_look, self._last_look_target = now, (pan, tilt)
 
     def base_rotate(self, rad: float, compensate_head: bool = True) -> None:
         """Rotate the base (CCW positive). Optionally counter-pan the head so the camera keeps looking at the

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -13,6 +15,42 @@ _ROTATIONS = {
     "ccw90": cv2.ROTATE_90_COUNTERCLOCKWISE,
     "180": cv2.ROTATE_180,
 }
+
+
+@dataclass
+class Intrinsics:
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    w: int
+    h: int
+
+    @classmethod
+    def from_fov(cls, w: int, h: int, hfov_deg: float) -> Intrinsics:
+        f = (w / 2) / math.tan(math.radians(hfov_deg) / 2)
+        return cls(f, f, (w - 1) / 2, (h - 1) / 2, w, h)
+
+    def rotated_cw90(self) -> Intrinsics:
+        """Intrinsics of the image after cv2.ROTATE_90_CLOCKWISE (new x = H-1-y, new y = x)."""
+        return Intrinsics(self.fy, self.fx, (self.h - 1) - self.cy, self.cx, self.h, self.w)
+
+    def rotated_ccw90(self) -> Intrinsics:
+        return Intrinsics(self.fy, self.fx, self.cy, (self.w - 1) - self.cx, self.h, self.w)
+
+    def rotated_180(self) -> Intrinsics:
+        return Intrinsics(self.fx, self.fy, (self.w - 1) - self.cx, (self.h - 1) - self.cy, self.w, self.h)
+
+
+def rotate_intrinsics(intr: Intrinsics, rotate: str) -> Intrinsics:
+    r = str(rotate).lower()
+    if r == "cw90":
+        return intr.rotated_cw90()
+    if r == "ccw90":
+        return intr.rotated_ccw90()
+    if r == "180":
+        return intr.rotated_180()
+    return intr
 
 
 class CameraError(RuntimeError):
@@ -90,6 +128,13 @@ class RealSenseSource(FrameSource):
         if self._depth:
             self._depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
             self._align = rs.align(rs.stream.color)
+        try:
+            vp = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            self.intrinsics = rotate_intrinsics(
+                Intrinsics(vp.fx, vp.fy, vp.ppx, vp.ppy, vp.width, vp.height), rotate
+            )
+        except Exception:  # pragma: no cover - hardware path
+            self.intrinsics = None
 
     def read(self):
         frames = self._pipe.wait_for_frames(timeout_ms=5000)

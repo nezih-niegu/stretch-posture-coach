@@ -173,6 +173,7 @@ def test_pipeline_follow_end_to_end(tmp_path):
         llm=FakeLLM(),
         window=False,
         stream=False,
+        vr=False,
     )
     session = p.run()
     assert head.translations and all(0 < t <= 0.15 for t in head.translations)
@@ -208,6 +209,7 @@ def test_pipeline_follow_backoff_announces_in_norteno(tmp_path):
         llm=FakeLLM(),
         window=False,
         stream=False,
+        vr=False,
         log_session=False,
     ).run()
     assert head.translations and head.translations[0] < 0

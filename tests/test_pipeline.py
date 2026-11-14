@@ -106,6 +106,7 @@ def run_pipeline(cfg, script, llm):
         llm=llm,
         window=False,
         stream=False,
+        vr=False,
     )
     session = p.run()
     # coach threads are daemon threads; give them a moment

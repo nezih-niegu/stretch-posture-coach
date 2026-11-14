@@ -8,6 +8,7 @@ import html
 import io
 import json
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -197,6 +198,16 @@ def make_charts(cols: dict, cfg: dict) -> list[tuple[str, str]]:
     series_chart(
         "l5s1_compression_n", "Estimated L5/S1 compression", "N", th.get("l5s1_compression_n"), ORANGE
     )
+    d = cols.get("distance_m")
+    if d is not None and np.any(~np.isnan(d)):
+        fig, ax = plt.subplots(figsize=(9, 2.6))
+        ax.axhspan(2.0, 3.0, color=STATUS["good"], alpha=0.10, linewidth=0)
+        ax.text(t[0], 2.95, "safe band 2-3 m", color=INK2, fontsize=7, va="top")
+        ax.plot(t, d, color=BLUE, linewidth=2)
+        _style(ax, "Distance between you and Stretch", "m")
+        ax.set_xlabel("minutes", color=INK2, fontsize=9)
+        charts.append(("Distance between you and Stretch", _fig_to_b64(fig)))
+        plt.close(fig)
 
     for key, spec, title in (
         ("rula", RULA_BANDS, "RULA score over time"),
@@ -219,7 +230,7 @@ def make_charts(cols: dict, cfg: dict) -> list[tuple[str, str]]:
 
 def write_report(session_dir: str | Path) -> Path:
     session_dir = Path(session_dir)
-    cols, _events, cfg = load_session(session_dir)
+    cols, events, cfg = load_session(session_dir)
     summary = summarize(session_dir)
     (session_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     charts = make_charts(cols, cfg) if summary.get("samples") else []
@@ -240,15 +251,22 @@ def write_report(session_dir: str | Path) -> Path:
     coach = "".join(
         f"<li>{html.escape(str(k))}: {v}</li>" for k, v in summary.get("coaching_by_issue", {}).items()
     )
+    said = [e for e in events if e.get("text")]
+    transcript = "".join(
+        f"<tr><td>{datetime.fromtimestamp(float(e.get('wall_time', 0))).strftime('%H:%M:%S')}</td>"
+        f"<td>{html.escape(str(e.get('issue') or e.get('key') or e.get('kind', '')))}</td>"
+        f"<td>{html.escape(e['text'])}</td><td class=muted>{html.escape(str(e.get('source', '')))}</td></tr>"
+        for e in said
+    )
     imgs = "".join(
-        f'<h3>{html.escape(title)}</h3><img alt="{html.escape(title)}" src="data:image/png;base64,{b64}">'
-        for title, b64 in charts
+        f'<p><img alt="{html.escape(title)}" src="data:image/png;base64,{b64}"></p>' for title, b64 in charts
     )
     doc = f"""<!doctype html><html><head><meta charset="utf-8"><title>Posture session {session_dir.name}</title>
 <style>body{{font-family:system-ui,sans-serif;background:#f9f9f7;color:{INK};max-width:980px;margin:24px auto;padding:0 16px}}
 table{{border-collapse:collapse;margin:8px 0 16px}}td,th{{border-bottom:1px solid {GRID};padding:4px 10px;text-align:left;font-size:14px}}
 th{{color:{INK2};font-weight:600}}img{{max-width:100%;background:{SURFACE};border-radius:6px}}.muted{{color:{INK2};font-size:13px}}</style>
-</head><body><h1>Posture session {html.escape(session_dir.name)}</h1>
+</head><body><p class="muted"><a href="/sessions">All sessions</a> · <a href="/">Live view</a></p>
+<h1>Posture session {html.escape(session_dir.name)}</h1>
 <p>Duration {summary.get("duration_min", 0)} min, in view {summary.get("in_view_min", 0)} min.
 RULA mean {summary.get("rula_mean", "-")} (max {summary.get("rula_max", "-")}), REBA mean {summary.get("reba_mean", "-")}
 (max {summary.get("reba_max", "-")}). Coaching messages: {summary.get("coaching_messages", 0)}
@@ -258,6 +276,8 @@ RULA mean {summary.get("rula_mean", "-")} (max {summary.get("rula_max", "-")}), 
 <h2>Metrics (while in view)</h2><table><tr><th>Metric</th><th>Mean</th><th>P95 |x|</th><th>Max |x|</th><th>Limit</th>
 <th>Time over limit</th><th>Unit</th></tr>{rows}</table>
 <h2>Coaching by issue</h2><ul>{coach or "<li>none</li>"}</ul>{imgs}
+<h2>What Stretch said</h2><table><tr><th>Time</th><th>Why</th><th>Message</th><th>Source</th></tr>
+{transcript or "<tr><td colspan=4>Nothing.</td></tr>"}</table>
 <p class="muted">Estimates from monocular pose (MediaPipe) and a static segment model; intended for ergonomic coaching,
 not clinical diagnosis.</p></body></html>"""
     out = session_dir / "report.html"

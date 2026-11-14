@@ -77,9 +77,14 @@ def _localize(cfg: dict, norteno: bool = False) -> None:
 
 
 def _run_pipeline(cfg: dict, duration: float | None, report: bool) -> None:
-    from .pipeline import Pipeline
+    import time
 
-    session = Pipeline(cfg).run(duration_s=duration)
+    from .pipeline import Pipeline, _host_ip
+
+    serve = bool(cfg["display"].get("serve_report", True)) and report
+    pipe = Pipeline(cfg, keep_servers=serve)
+    session = pipe.run(duration_s=duration)
+    out = None
     if session and report:
         from .report import summarize, write_report
 
@@ -91,6 +96,25 @@ def _run_pipeline(cfg: dict, duration: float | None, report: bool) -> None:
             f"In view {s.get('in_view_min', 0)} min | RULA mean {s.get('rula_mean', '-')} | "
             f"REBA mean {s.get('reba_mean', '-')} | coaching messages {s.get('coaching_messages', 0)}"
         )
+    if not serve or (pipe.streamer is None and pipe.vr is None):
+        pipe.close_servers()
+        return
+    pipe.show_report(out)
+    ip = _host_ip()
+    if pipe.streamer:
+        typer.echo(
+            f"\nReport on the web:  http://{ip}:{pipe.streamer.port}/report   (all sessions: /sessions)"
+        )
+    if pipe.vr:
+        typer.echo(f"Report in the Quest: {pipe.vr.scheme}://{ip}:{pipe.vr.port}/report")
+    typer.echo("Open pages switch to the report automatically. Press Ctrl+C to quit.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pipe.close_servers()
 
 
 @app.command()
@@ -110,6 +134,7 @@ def run(
     no_llm: bool = typer.Option(False, "--no-llm", help="Use rule-based messages only"),
     no_robot: bool = typer.Option(False, "--no-robot", help="Do not move the head"),
     no_stream: bool = typer.Option(False, "--no-stream", help="Disable the web viewer"),
+    no_vr: bool = typer.Option(False, "--no-vr", help="Disable the VR telepresence server"),
     window: bool = typer.Option(None, "--window/--no-window", help="Force the OpenCV window on/off"),
     calibrate_first: bool = typer.Option(False, "--calibrate", help="Run neutral-posture calibration first"),
     duration: float = typer.Option(None, help="Stop after N seconds"),
@@ -135,6 +160,8 @@ def run(
         cfg["robot"]["enabled"] = False
     if no_stream:
         cfg["display"]["stream"] = False
+    if no_vr:
+        cfg["vr"]["enabled"] = False
     if window is not None:
         cfg["display"]["window"] = window
     if follow:
@@ -159,6 +186,7 @@ def follow(
     ),
     language: str = typer.Option(None, help="Language for spoken notices (English, Spanish)"),
     no_stream: bool = typer.Option(False, "--no-stream"),
+    no_vr: bool = typer.Option(False, "--no-vr", help="Disable the VR telepresence server"),
     duration: float = typer.Option(None, help="Stop after N seconds"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -172,6 +200,8 @@ def follow(
     cfg["coach"]["enabled"] = coach
     if no_stream:
         cfg["display"]["stream"] = False
+    if no_vr:
+        cfg["vr"]["enabled"] = False
     _localize(cfg, norteno)
     _run_pipeline(cfg, duration, report=coach)
 
@@ -365,6 +395,35 @@ def check(
 
     typer.echo("\nAll required checks passed." if ok_all else "\nSome checks failed - see above.")
     raise typer.Exit(0 if ok_all else 1)
+
+
+@app.command()
+def serve(
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+    port: int = typer.Option(None, help="Port (default: display.stream_port, 8080)"),
+) -> None:
+    """Serve past session reports at http://<robot>:8080/sessions (no camera, no robot)."""
+    import time
+
+    from .pipeline import _host_ip
+    from .stream import serve_reports
+
+    _setup_logging(False)
+    cfg = _cfg(config, sets)
+    srv = serve_reports(
+        cfg["logging"]["sessions_dir"],
+        cfg["display"].get("stream_host", "0.0.0.0"),
+        port or int(cfg["display"].get("stream_port", 8080)),
+    )
+    typer.echo(f"Reports: http://{_host_ip()}:{srv.port}/sessions   (latest: /report)  - Ctrl+C to quit")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.close()
 
 
 @app.command("report")

@@ -16,6 +16,8 @@ dependencies = [
     "requests>=2.31",
     "matplotlib>=3.8",
     "piper-tts>=1.2",
+    "websockets>=13",
+    "cryptography>=42",
 ]
 
 [project.scripts]
