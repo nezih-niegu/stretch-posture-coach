@@ -258,3 +258,111 @@ def test_pipeline_fall_end_to_end(tmp_path):
     p2.step(frame, ts)
     assert p2.fall.state == OK and not p2.alarm.active
     p2.close()
+
+
+def _ntfy_server():
+    got = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            got.append((dict(self.headers), body.decode()))
+            self.send_response(200)
+            self.end_headers()
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, got
+
+
+def _pipeline(tmp_path, script, depth=2.5, **over):
+    from test_follow import FakeHead
+    from test_pipeline import FakeEstimator, FakeLLM, FakeSource, FakeSpeaker
+
+    from stretch_posture_coach.pipeline import Pipeline
+
+    class Speaker(FakeSpeaker):
+        def say_blocking(self, text):
+            self.said.append(text)
+
+    base = {
+        "logging": {"sessions_dir": str(tmp_path / "s")},
+        "analysis": {"calibration_file": str(tmp_path / "c")},
+        "coach": {"greet": False, "min_interval_s": 3},
+        "alarm": {"siren": False, "repeat_s": 0.2},
+        "thresholds": {"hold_s": 2},
+    }
+    for k, v in over.items():
+        base[k] = {**base.get(k, {}), **v}
+    cfg = load_config(overrides=base)
+    src = FakeSource(script)
+    src.last_depth = np.full((640, 480), depth, np.float32)
+    sp = Speaker()
+    p = Pipeline(
+        cfg,
+        source=src,
+        estimator=FakeEstimator(src),
+        head=FakeHead(),
+        speaker=sp,
+        llm=FakeLLM(),
+        window=False,
+        stream=False,
+        vr=False,
+    )
+    return p, sp
+
+
+def test_no_posture_tips_while_lying_on_the_floor(tmp_path):
+    # lying on the floor the whole time: trunk_flexion would normally be coached after 2 s
+    p, sp = _pipeline(tmp_path, [(34, {"trunk_flex": 88, "drop": 0.6})])
+    session = p.run()
+    events = [json.loads(x) for x in (session / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert not [e for e in events if e["kind"] in ("issue", "praise", "break")]
+    assert [e["state"] for e in events if e["kind"] == "fall"][:1] == [CHECK]  # long-lying check still speaks
+    assert any("okay" in s.lower() for s in sp.said)
+
+
+def test_fall_recovered_sends_check_and_resolved_notifications(tmp_path):
+    srv, got = _ntfy_server()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    p, sp = _pipeline(
+        tmp_path,
+        [(3, {}), (0.3, {"trunk_flex": 50, "drop": 0.3}), (4, {"trunk_flex": 88, "drop": 0.6}), (5, {})],
+        alarm={"ntfy_topic": "t", "ntfy_server": base},
+    )
+    p.run()
+    import time as _t
+
+    _t.sleep(0.5)
+    srv.shutdown()
+    titles = [h["Title"] for h, _ in got]
+    assert titles == ["Stretch: possible fall", "Stretch: fall alert cleared"]
+    assert got[0][0]["Priority"] == "high"
+    assert not any("ALARM" in t for t in titles)
+
+
+def test_coach_drops_inflight_tip_when_muted():
+    from stretch_posture_coach.coach import Coach
+
+    class Sp:
+        busy = False
+
+        def __init__(self):
+            self.said = []
+
+        def say(self, t):
+            self.said.append(t)
+
+    sp = Sp()
+    c = Coach(load_config(), sp, None)
+    c._t = 10.0
+    c.mute(10.0, 30)
+    c._speak("Sit up straight!", {"kind": "issue"})
+    c._speak("¿Estás bien?", {"kind": "announce"})
+    assert sp.said == ["¿Estás bien?"]
+    c._t = 41.0
+    c._speak("Sit up straight!", {"kind": "issue"})
+    assert sp.said[-1] == "Sit up straight!"

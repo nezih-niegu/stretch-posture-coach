@@ -327,3 +327,55 @@ def test_session_end_serves_report_on_both_servers(tmp_path):
         assert session.name.encode() in body
     finally:
         p.close_servers()
+
+
+def test_end_session_button_rotates_and_builds_report(tmp_path):
+    from test_follow import FakeHead
+    from test_pipeline import FakeEstimator, FakeLLM, FakeSource, FakeSpeaker
+
+    from stretch_posture_coach.pipeline import Pipeline
+
+    cfg = load_config(
+        overrides={
+            "logging": {"sessions_dir": str(tmp_path / "sessions")},
+            "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "coach": {"greet": False},
+            "display": {"stream_port": 0, "stream_host": "127.0.0.1"},
+        }
+    )
+    src = FakeSource([(6, {"trunk_flex": 30})])
+    p = Pipeline(
+        cfg,
+        source=src,
+        estimator=FakeEstimator(src),
+        head=FakeHead(),
+        speaker=FakeSpeaker(),
+        llm=FakeLLM(),
+        window=False,
+        stream=True,
+        vr=False,
+        keep_servers=True,
+    )
+    first = p.logger.dir
+    base = f"http://127.0.0.1:{p.streamer.port}"
+    for _ in range(25):
+        p.step(*src.read())
+    req = urllib.request.Request(base + "/session/end", method="POST", data=b"")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert json.loads(r.read())["ending"] == first.name
+    for _ in range(25):  # keeps running: the next frame rotates the session
+        p.step(*src.read())
+    assert p.logger.dir != first and (p.logger.dir / "metrics.csv").exists()
+    for _ in range(100):
+        if (p.last_report or {}).get("status") == "ready":
+            break
+        time.sleep(0.05)
+    st = json.loads(get(base + "/state")[2])
+    assert st["state"] == "running" and st["last_report"]["status"] == "ready"
+    assert st["last_report"]["url"] == f"/sessions/{first.name}/"
+    code, _, body = get(base + st["last_report"]["url"])
+    assert code == 200 and b"Posture session" in body
+    ev = [json.loads(x) for x in (first / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert ev[-1]["kind"] == "session_end" and ev[-1]["by"] == "web button"
+    p.close()
+    p.close_servers()

@@ -84,7 +84,7 @@ class Alarm:
         log.warning("FALL ALARM: %s", reason)
         self._thread = threading.Thread(target=self._loop, daemon=True, name="alarm")
         self._thread.start()
-        threading.Thread(target=self.notify, args=("alarm", reason), daemon=True, name="alarm-notify").start()
+        self.notify_async("alarm", reason)
 
     def stop(self, why: str = "") -> None:
         if not self.active:
@@ -92,10 +92,6 @@ class Alarm:
         self.active = False
         self._stop.set()
         log.warning("Fall alarm cleared: %s", why)
-        if why:
-            threading.Thread(
-                target=self.notify, args=("resolved", why), daemon=True, name="alarm-notify"
-            ).start()
 
     def _loop(self):
         wav_path = None
@@ -122,16 +118,23 @@ class Alarm:
                 Path(wav_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ notifications
+    def notify_async(self, kind: str, reason: str) -> None:
+        threading.Thread(target=self.notify, args=(kind, reason), daemon=True, name="alarm-notify").start()
+
     def notify(self, kind: str, reason: str) -> None:
-        title = "Stretch: FALL DETECTED" if kind == "alarm" else "Stretch: fall alarm cleared"
+        """kind: "check" (possible fall, asking), "alarm" (no response), "resolved"."""
+        title, priority, tags = {
+            "check": ("Stretch: possible fall", "high", "warning"),
+            "alarm": ("Stretch: FALL DETECTED - no response", "urgent", "rotating_light"),
+        }.get(kind, ("Stretch: fall alert cleared", "default", "white_check_mark"))
         text = f"{reason}. Live view: {self.live_url}" if self.live_url else reason
         topic = str(self.c.get("ntfy_topic") or "").strip()
         if topic:
             url = f"{str(self.c.get('ntfy_server', 'https://ntfy.sh')).rstrip('/')}/{topic}"
             headers = {
                 "Title": title,
-                "Priority": "urgent" if kind == "alarm" else "default",
-                "Tags": "rotating_light" if kind == "alarm" else "white_check_mark",
+                "Priority": priority,
+                "Tags": tags,
             }
             if self.live_url:
                 headers["Click"] = self.live_url

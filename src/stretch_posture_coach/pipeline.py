@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .robot import make_head, wait_for_tilt
 from .speech import Speaker
 
 log = logging.getLogger(__name__)
+_REPORT_LOCK = threading.Lock()  # matplotlib report building, one at a time
 
 TORSO_IDX = [11, 12, 23, 24]
 
@@ -200,9 +202,10 @@ class Pipeline:
                 log.info("Live view: http://%s:%d/", _host_ip(), self.streamer.port)
             except OSError as e:
                 log.warning("Could not start web viewer: %s", e)
-        for srv in (self.streamer, self.vr):  # fall alarm: "I'm OK" buttons + snapshot
+        for srv in (self.streamer, self.vr):  # fall alarm: "I'm OK" buttons + snapshot; End-session button
             if srv is not None:
                 srv.on_ack = self.request_fall_ack
+                srv.on_end_session = self.request_end_session
                 srv.snapshot_provider = lambda: self.alarm.snapshot
         self.fps = 0.0
         self.frames = 0
@@ -213,6 +216,10 @@ class Pipeline:
             self.logger.event(ev)
 
     def step(self, frame: np.ndarray, ts: float):
+        who = getattr(self, "_end_session_request", None)
+        if who and self.logger is not None:
+            self._end_session_request = None
+            self._rotate_session(who)
         pose = self.estimator.process(frame, ts)
         raw = None
         if pose is not None:
@@ -231,8 +238,7 @@ class Pipeline:
             w_img, h_img, float(self.cfg.get("vr", {}).get("fallback_hfov_deg", 60))
         )
         self._update_fall(frame, pose, raw, depth, intr, ts)
-        if not self.fall.active:  # no posture coaching while checking on / alarming about a fall
-            self.coach.update(a, ts)
+        self.coach.update(a, ts)  # muted (see _update_fall) while someone is down or a fall is being handled
         target = _torso_target(pose, self.min_vis) if a.present else None
         forward_pan = float(self.cfg.get("follow", {}).get("forward_pan_rad", 0.0))
         look = self.vr.look_target() if self.vr else None
@@ -439,6 +445,61 @@ class Pipeline:
         if self.window:
             cv2.destroyAllWindows()
 
+    # ------------------------------------------------------------------ sessions
+    def request_end_session(self, who: str = "web") -> dict:
+        """Called from the web/VR threads: close the current session and start a new one at the next frame.
+        The camera, robot and web services keep running; the report is built in the background."""
+        if self.logger is None:
+            return {"ok": False, "error": "session logging is disabled"}
+        self._end_session_request = who
+        return {"ok": True, "ending": self.logger.dir.name}
+
+    def _rotate_session(self, who: str) -> None:
+        old = self.logger
+        old.event({"kind": "session_end", "by": who, "wall_time": time.time()})
+        old.close()
+        self.logger = SessionLogger(
+            self.cfg["logging"].get("sessions_dir", "sessions"),
+            self.cfg,
+            float(self.cfg["logging"].get("log_hz", 5)),
+        )
+        self.alarm.snapshot_dir = self.logger.dir
+        log.info("Session %s ended (%s); new session %s started", old.dir.name, who, self.logger.dir.name)
+        self._set_last_report(
+            {"name": old.dir.name, "status": "building", "url": f"/sessions/{old.dir.name}/"}
+        )
+        threading.Thread(target=self._build_report, args=(old.dir,), daemon=True, name="report").start()
+
+    def _build_report(self, session_dir: Path) -> None:
+        from .report import summarize, write_report
+
+        with _REPORT_LOCK:
+            try:
+                write_report(session_dir)
+                sm = summarize(session_dir)
+                self._set_last_report(
+                    {
+                        "name": session_dir.name,
+                        "status": "ready",
+                        "time": time.time(),
+                        "url": f"/sessions/{session_dir.name}/",
+                        "in_view_min": sm.get("in_view_min"),
+                        "rula_mean": sm.get("rula_mean"),
+                        "messages": sm.get("coaching_messages"),
+                    }
+                )
+            except Exception as e:
+                log.error("report for %s failed: %s", session_dir.name, e)
+                self._set_last_report({"name": session_dir.name, "status": "failed", "url": "/sessions"})
+
+    def _set_last_report(self, info: dict) -> None:
+        self.last_report = info
+        for srv in (self.streamer, self.vr):
+            if srv is not None:
+                srv.last_report = info
+                if hasattr(srv, "notify_state"):
+                    srv.notify_state()
+
     # ------------------------------------------------------------------ fall detection
     def request_fall_ack(self, who: str) -> None:
         """Called from the web/VR server threads ("I'm OK" / caregiver acknowledged)."""
@@ -458,7 +519,15 @@ class Pipeline:
                 float(self.cfg["camera"].get("height_m", 1.3)),
                 self.min_vis,
             )
-        change = self.fall.update(features_from(ts, present, pose, raw, hip_h, self.min_vis))
+        feats = features_from(ts, present, pose, raw, hip_h, self.min_vis)
+        change = self.fall.update(feats)
+        # never give posture tips to someone who is down: while lying, during a fall check/alarm, and for a
+        # quiet period after it clears (the "are you OK?" check and the alarm still speak)
+        fcfg = self.cfg.get("fall", {})
+        if self.fall.state != OK:
+            self.coach.mute(ts, float(fcfg.get("quiet_after_s", 30)))
+        elif self.fall.is_down(feats):
+            self.coach.mute(ts, float(fcfg.get("quiet_lying_s", 10)))
         if self._fall_ack:
             who, self._fall_ack = self._fall_ack, None
             change = self.fall.acknowledge(ts, who) or change
@@ -475,16 +544,24 @@ class Pipeline:
             text = t.get("fall_check", "")
             self.speaker.say(text)
             self.alarm.save_snapshot(frame, "check")
+            if self.cfg.get("alarm", {}).get("notify_on_check", True):
+                self.alarm.notify_async("check", reason)
+                self._fall_notified = True
             if not present and self.head.tilt is not None:  # look down where they were
                 self.head.look(self.head.pan or 0.0, max(-1.2, self.head.tilt - 0.5), ts)
             log.warning("FALL CHECK: %s", reason)
         elif state == ALARM:
             text = t.get("fall_alarm", "")
             self.alarm.save_snapshot(frame, "alarm")
-            self.alarm.start(reason)
+            self.alarm.start(reason)  # also sends the urgent notification
+            self._fall_notified = True
         elif state == OK:
             was_alarm = self.alarm.active
+            self.coach.mute(ts, float(self.cfg.get("fall", {}).get("quiet_after_s", 30)))
             self.alarm.stop(reason)
+            if was_alarm or getattr(self, "_fall_notified", False):  # tell the phone it's over
+                self.alarm.notify_async("resolved", reason)
+            self._fall_notified = False
             if "sat down" not in reason:  # false start (sat down fast): say nothing
                 text = t.get("fall_ok", "")
                 self.speaker.say(text)

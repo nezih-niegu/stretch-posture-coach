@@ -161,13 +161,20 @@ class Coach:
     def busy(self) -> bool:
         return self._busy.is_set() or self.speaker.busy
 
+    def mute(self, now: float, seconds: float) -> None:
+        """No posture tips / praise / break reminders until ``now + seconds`` (e.g. someone is on the floor)."""
+        self.mute_until = max(getattr(self, "mute_until", 0.0), now + seconds)
+
+    def muted(self, now: float | None = None) -> bool:
+        return (self._t if now is None else now) < getattr(self, "mute_until", -1e9)
+
     def update(self, a: Assessment, now: float) -> None:
         self._t = now
         self._update_presence(a, now)
         if self.busy:
             self.last_spoken = now  # measure the quiet interval from the END of the last message
             return
-        if not self.enabled or not a.present:
+        if not self.enabled or not a.present or self.muted(now):
             return
         since_last = now - self.last_spoken
 
@@ -260,6 +267,10 @@ class Coach:
             self._busy.clear()
 
     def _speak(self, text: str, event: dict):
+        if self.muted() and event.get("kind") in ("issue", "praise", "break"):
+            # e.g. an LLM tip that was being generated when the person fell: drop it
+            log.info("coach: dropped %s message while muted: %s", event.get("kind"), text)
+            return
         self.last_spoken = max(self.last_spoken, self._t)
         self.history.append(text)
         self.last_message = text

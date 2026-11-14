@@ -142,10 +142,14 @@ Sitting down fast or bending over to pick something up does not count. Lying on 
 for 30 s without a seen fall also counts. Lying on a bed or couch doesn't.
 
 1. **Check:** Stretch asks out loud: *"Are you OK? If you're OK, stand up or raise your hand."* The live page
-   and the VR view show an orange banner. Posture coaching and base motion pause.
+   and the VR view show an orange banner. If ntfy is configured, a **"possible fall" push (high priority)** goes
+   to your phone right away. Base motion pauses.
 2. **Recovery** cancels it: standing/sitting upright for 3 s, a raised hand held 1.5 s, or the
    **"I'm OK / acknowledge"** button on the web page, the VR page, or the **grip** button in the headset.
-3. **Alarm** after 12 s with no recovery: a loud two-tone **siren** plus a spoken alert through the robot
+3. **No posture tips while someone is down.** Stretch never gives posture corrections to someone lying down,
+   during a fall check or alarm, or for 30 s after it clears (`fall.quiet_after_s`). A tip the AI was already
+   writing when the fall happened is dropped. Only the "are you OK?" check and the alarm speak.
+4. **Alarm** after 12 s with no recovery: a loud two-tone **siren** plus a spoken alert through the robot
    speaker (repeating), a flashing red banner with a **snapshot** on the web page and in VR, a
    `fall_*.jpg` snapshot saved in the session folder, and **phone notifications** if configured. It stays on until
    someone acknowledges or the person gets up. Every step is logged and shows up in the session report.
@@ -159,7 +163,10 @@ alarm:
   webhook_url: ""                      # or POST JSON to Home Assistant / Slack / Teams / your server
 ```
 
-The notification is urgent priority, and tapping it opens the robot's live view.
+You get up to three pushes: **"possible fall"** (high priority) when Stretch starts asking, **"FALL DETECTED - no
+response"** (urgent) if the alarm goes off, and **"fall alert cleared"** when the person is OK again or someone
+acknowledges. Tapping a notification opens the robot's live view. Set `alarm.notify_on_check: false` to push
+only on the alarm.
 In `config.yaml → fall` you can tune `check_s`, `long_lying_s` (0 = off), `drop_m`, `lying_incl_deg` and
 `camera.height_m` (head camera height, used for hip height). Set `alarm.siren: false` to keep only the
 spoken alert.
@@ -170,7 +177,12 @@ spoken alert.
 
 ## Session report on the web
 
-When you stop a session (Ctrl+C), the report is written and **the live page switches to it automatically**:
+**End session & save report** (button on the live page `:8080`, and on the VR page): closes the current session,
+builds its report in the background, and immediately starts a new session. Camera, robot, coaching, fall
+detection, follow mode and the web/VR services **keep running**. A green notice links to the saved report.
+Use it to split a day into sessions (e.g. one per task or per person) without restarting anything.
+
+When you stop the program (Ctrl+C), the report is written and **the live page switches to it automatically**:
 `http://<robot-ip>:8080/report`. The server stays up until you press Ctrl+C a second time. All past
 sessions are listed at `/sessions`. Each report includes time in RULA/REBA risk bands, % time over each limit,
 charts (neck/trunk flexion, L5/S1 load, RULA/REBA, distance to Stretch) and a transcript of **what Stretch
@@ -294,7 +306,7 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 78 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
+uv run pytest            # 82 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
 uv run ruff check .
 ```
 

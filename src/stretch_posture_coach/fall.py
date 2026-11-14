@@ -128,6 +128,10 @@ class FallDetector:
                 return f"hips moved down {moved:.1f} torso lengths in {win:.1f} s"
         return None
 
+    def is_down(self, f: FallFeatures) -> bool:
+        """Lying with low hips (or lying, when there's no depth) - nobody needs posture tips right now."""
+        return f.present and self._lying(f)
+
     def _lying(self, f: FallFeatures) -> bool:
         if f.inclination is None or f.inclination < self._p("lying_incl_deg", 55):
             return False

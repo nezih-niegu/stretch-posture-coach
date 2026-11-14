@@ -291,6 +291,8 @@ class VRServer:
         self._alarm = {"type": "alarm", "state": "ok", "active": False, "reason": ""}
         self.on_ack = None  # callable(who): a viewer acknowledged the fall alarm
         self.snapshot_provider = None  # callable() -> jpeg bytes | None
+        self.on_end_session = None  # callable(who) -> dict
+        self.last_report: dict | None = None
         self._aux: list[AuxCamera] = []
         self._aux_started = False
         self._running = True
@@ -354,6 +356,10 @@ class VRServer:
         if not lk or not lk.get("active") or time.monotonic() - lk["t"] > max_age_s:
             return None
         return float(lk["yaw"]), float(lk["pitch"])
+
+    def notify_state(self) -> None:
+        """Push changed status (e.g. last_report) to viewers."""
+        self.loop.call_soon_threadsafe(self._wake_all)
 
     def set_alarm(self, st: dict) -> None:
         """Fall-detector state; pushed to viewers only when it changes."""
@@ -557,7 +563,10 @@ class VRServer:
                         m = json.loads(msg)
                     except ValueError:
                         continue
-                    if m.get("type") == "alarm_ack":
+                    if m.get("type") == "end_session":
+                        if self.on_end_session:
+                            self.on_end_session("VR viewer")
+                    elif m.get("type") == "alarm_ack":
                         if self.on_ack:
                             self.on_ack("VR viewer")
                     elif m.get("type") == "ack":
@@ -590,6 +599,9 @@ class VRServer:
                 if client.sent.get("state") != self._state:
                     await conn.send(json.dumps(self._state))
                     client.sent["state"] = dict(self._state)
+                if self.last_report and client.sent.get("report") != self.last_report:
+                    await conn.send(json.dumps({"type": "report", **self.last_report}))
+                    client.sent["report"] = dict(self.last_report)
                 if client.sent.get("alarm") != self._alarm:
                     await conn.send(json.dumps(self._alarm))
                     client.sent["alarm"] = dict(self._alarm)

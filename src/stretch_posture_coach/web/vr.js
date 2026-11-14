@@ -376,8 +376,18 @@ function onAlarm(a) {
   }
 }
 
+$('endsess').onclick = () => {
+  if (!confirm('End this session and save its report? Stretch keeps running.')) return;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'end_session' }));
+};
+function onReport(r) {
+  $('saved').innerHTML = r.status === 'ready'
+    ? `Saved ${r.name} · <a href="${r.url}" target="_blank">report</a>` : `Saving ${r.name}…`;
+}
+
 function onState(s) {
   if (s.type === 'alarm') return onAlarm(s);
+  if (s.type === 'report') return onReport(s);
   if (s.type === 'state' && s.state === 'ended') {
     msg('Session ended - opening the report…');
     const go = () => { location.href = s.report || '/sessions'; };

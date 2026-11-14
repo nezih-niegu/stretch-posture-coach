@@ -58,6 +58,10 @@ class SessionLogger:
     def __init__(self, sessions_dir: str | Path, cfg: dict, log_hz: float = 5.0, name: str | None = None):
         stamp = name or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.dir = Path(sessions_dir) / stamp
+        n = 2
+        while (self.dir / "metrics.csv").exists():  # two sessions in the same second (End-session button)
+            self.dir = Path(sessions_dir) / f"{stamp}_{n}"
+            n += 1
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         self._csv_f = open(self.dir / "metrics.csv", "w", newline="", encoding="utf-8")
@@ -101,8 +105,11 @@ class SessionLogger:
             self._csv_f.flush()
 
     def event(self, ev: dict) -> None:
-        self._events.write(json.dumps(ev, default=str, ensure_ascii=False) + "\n")
-        self._events.flush()
+        try:
+            self._events.write(json.dumps(ev, default=str, ensure_ascii=False) + "\n")
+            self._events.flush()
+        except ValueError:  # closed by a session rotation while another thread was writing
+            pass
 
     def close(self) -> None:
         self._csv_f.close()

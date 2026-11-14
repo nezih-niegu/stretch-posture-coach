@@ -141,12 +141,15 @@ fall:
   hand_ok_s: 1.5
   floor_height_m: 0.45     # lying with hips below this = on the floor
   long_lying_s: 30         # on the floor this long, even without a seen fall -> check (0 = off)
+  quiet_after_s: 30        # no posture tips for this long after a fall check/alarm clears
+  quiet_lying_s: 10        # ...and while someone is lying down (+ this long after)
 
 alarm:
   siren: true              # loud two-tone siren through the robot speaker
   volume: 1.5              # paplay volume (1.0 = 100 %)
   repeat_s: 4              # pause between siren + spoken alert cycles
   max_duration_s: 600      # stop the siren after this (the alarm stays visible on the web/VR)
+  notify_on_check: true    # phone push "possible fall" as soon as Stretch asks "are you OK?" (urgent at the alarm)
   ntfy_topic: ""           # phone push: install the ntfy app, subscribe to a hard-to-guess topic, put it here
   ntfy_server: https://ntfy.sh
   webhook_url: ""          # optional: POST JSON {event, reason, time, live_url} here (Slack/Teams/Home Assistant...)

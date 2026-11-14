@@ -28,15 +28,34 @@ img{max-width:100%;max-height:85vh;border-radius:8px}pre{font-size:12px;white-sp
  background:#d03b3b;color:#fff;font-size:20px;animation:blink 1s steps(2,start) infinite}
 #alarm.check{background:#c77700;animation:none}#alarm button{font-size:20px;padding:10px 18px;margin-left:16px;
  border:0;border-radius:8px;background:#fff;color:#900;font-weight:700}#alarm img{max-height:160px;float:right;border-radius:6px}
-@keyframes blink{to{background:#7a1010}}</style></head>
+@keyframes blink{to{background:#7a1010}}
+#endbtn{font-size:15px;padding:7px 14px;border-radius:8px;border:0;background:#2a78d6;color:#fff;cursor:pointer}
+#endbtn:disabled{background:#555}#saved{display:none;padding:10px 14px;border-radius:8px;background:#1f3b26;
+ color:#cfe9d4;margin-bottom:12px}#saved a{color:#9fe0b0;font-weight:600}</style></head>
 <body><div id="alarm"><img id="snap" alt=""><b id="atitle"></b> <span id="areason"></span>
-<button onclick="fetch('/alarm/ack',{method:'POST'})">I'm OK / acknowledge</button></div><div class="bar"><h3>Stretch Posture Coach</h3><a href="/sessions">Past sessions</a>__VR__</div>
+<button onclick="fetch('/alarm/ack',{method:'POST'})">I'm OK / acknowledge</button></div><div class="bar"><h3>Stretch Posture Coach</h3><a href="/sessions">Past sessions</a>__VR__
+<button id="endbtn" onclick="endSession()">End session &amp; save report</button></div>
+<div id="saved"></div>
 <div class="row"><div><img id="live" src="/stream"></div>
 <div class="col"><h4>Live metrics</h4><pre id="m">waiting...</pre></div></div>
 <script>
 setInterval(async()=>{try{const r=await fetch('/metrics');document.getElementById('m').textContent=
 JSON.stringify(await r.json(),null,1)}catch(e){}},1000);
-setInterval(async()=>{try{const s=await (await fetch('/state')).json();
+let lastShown='';
+async function endSession(){
+ if(!confirm('End this session and save its report? Stretch keeps running and starts a new session.'))return;
+ const b=document.getElementById('endbtn');b.disabled=true;b.textContent='Saving…';
+ try{await fetch('/session/end',{method:'POST'})}catch(e){}
+ setTimeout(()=>{b.disabled=false;b.textContent='End session & save report'},4000);
+}
+function showSaved(r){
+ if(!r||!r.name)return;const box=document.getElementById('saved');const key=r.name+r.status;
+ if(key===lastShown)return;lastShown=key;box.style.display='block';
+ box.innerHTML=r.status==='ready'?`Session <b>${r.name}</b> saved (${r.in_view_min??'-'} min in view, RULA mean ${r.rula_mean??'-'}). `+
+  `<a href="${r.url}" target="_blank">Open report</a> · a new session is recording.`:
+  r.status==='building'?`Saving session <b>${r.name}</b>… building the report.`:`Report for ${r.name} failed - see <a href="/sessions">sessions</a>.`;
+}
+setInterval(async()=>{try{const s=await (await fetch('/state')).json();showSaved(s.last_report);
  const a=s.alarm||{}, box=document.getElementById('alarm');
  if(a.active){box.style.display='block';box.className=a.state==='alarm'?'':'check';
   document.getElementById('atitle').textContent=a.state==='alarm'?'FALL ALARM':'Possible fall - checking…';
@@ -66,6 +85,8 @@ class FrameStreamer:
         self.alarm: dict = {}  # fall-detector state, set by the pipeline
         self.on_ack = None  # callable(who) - "I'm OK" / acknowledge button
         self.snapshot_provider = None  # callable() -> jpeg bytes | None
+        self.on_end_session = None  # callable(who) -> dict - "End session & save report" button
+        self.last_report: dict | None = None
         vr_link = (
             (
                 f' <a id="vr" href="#">VR view (Quest)</a><script>document.getElementById("vr").href='
@@ -97,6 +118,7 @@ class FrameStreamer:
                         "state": "ended" if streamer._ended else "running",
                         "report": "/report" if streamer.report_path else None,
                         "alarm": streamer.alarm,
+                        "last_report": streamer.last_report,
                     }
                     self._send(200, "application/json", json.dumps(st).encode())
                 elif path.startswith("/stream"):
@@ -117,9 +139,14 @@ class FrameStreamer:
                         self._send(*res)
 
             def do_POST(self):
-                if self.path.split("?", 1)[0] == "/alarm/ack" and streamer.on_ack:
+                path = self.path.split("?", 1)[0]
+                if path == "/alarm/ack" and streamer.on_ack:
                     streamer.on_ack("web")
                     self._send(200, "application/json", b'{"ok":true}')
+                elif path == "/session/end" and streamer.on_end_session and not streamer._ended:
+                    self._send(
+                        200, "application/json", json.dumps(streamer.on_end_session("web button")).encode()
+                    )
                 else:
                     self._send(404, "text/plain", b"not found")
 

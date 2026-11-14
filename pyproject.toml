@@ -5,6 +5,7 @@ description = "Full-body biomechanical posture analysis (MediaPipe) with spoken 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "nezih-niegu" }]
 keywords = ["stretch", "hello-robot", "mediapipe", "ergonomics", "rula", "reba", "ollama", "posture"]
 dependencies = [
     "typer>=0.12",
