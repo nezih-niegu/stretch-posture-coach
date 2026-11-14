@@ -555,6 +555,98 @@ def serve(
         srv.close()
 
 
+scene_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help="Scene understanding: static 3-D map of the room + OneSLAM bridge (camera-only SLAM).",
+)
+app.add_typer(scene_app, name="scene")
+
+
+def _session_path(session: str | None, cfg: dict) -> Path:
+    from .report import latest_session
+
+    root = Path(cfg["logging"]["sessions_dir"])
+    if session is None:
+        found = latest_session(root)
+        if found is None:
+            typer.echo("No sessions found.")
+            raise typer.Exit(1)
+        return found
+    p = Path(session)
+    return p if p.exists() else root / session
+
+
+@scene_app.command("build")
+def scene_build(
+    session: str = typer.Argument(None, help="Session folder or name (default: latest)"),
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+) -> None:
+    """(Re)build the scene map and the report for a session."""
+    from .report import write_report
+
+    cfg = _cfg(config, sets)
+    sess = _session_path(session, cfg)
+    out = write_report(sess)
+    sc = (
+        json.loads((sess / "scene" / "scene.json").read_text())
+        if (sess / "scene" / "scene.json").exists()
+        else {}
+    )
+    typer.echo(json.dumps({k: v for k, v in sc.items() if k != "oneslam"}, indent=2))
+    typer.echo(f"Report: {out}")
+
+
+@scene_app.command("export-oneslam")
+def scene_export(
+    session: str = typer.Argument(None, help="Session folder or name (default: latest)"),
+    out: Path = typer.Option(None, help="Output folder (default: <session>/scene/oneslam_input)"),
+    with_depths: bool = typer.Option(
+        False, "--with-depths", help="Also write depths/ (for an RGB-D OneSLAM fork)"
+    ),
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+) -> None:
+    """Write the session's keyframes in OneSLAM's input format (images/, calibration.json, ...)."""
+    from .pipeline import _host_ip
+    from .scene import export_oneslam
+
+    cfg = _cfg(config, sets)
+    sess = _session_path(session, cfg)
+    d = export_oneslam(sess, out, with_depths, cfg)
+    notes = json.loads((d / "stretch_export.json").read_text())
+    typer.echo(
+        f"OneSLAM input: {d}  ({notes['frames']} frames @ {notes['fps']} Hz, camera travel "
+        f"{notes['camera_travel_m']} m)"
+    )
+    if notes.get("warning"):
+        typer.echo(f"WARNING: {notes['warning']}")
+    typer.echo("\nOn a machine with an NVIDIA GPU (needs conda + cmake):")
+    typer.echo(f"  scp -r hello-robot@{_host_ip()}:{d.resolve()} ./stretch_{sess.name}")
+    typer.echo(f"  ./scripts/run_oneslam.sh ./stretch_{sess.name}")
+    typer.echo("Then copy poses_pred.txt back and run:")
+    typer.echo(f"  posture-coach scene import-oneslam {sess.name} poses_pred.txt")
+
+
+@scene_app.command("import-oneslam")
+def scene_import(
+    session: str = typer.Argument(..., help="Session folder or name"),
+    poses: Path = typer.Argument(..., help="OneSLAM poses_pred.txt (or its experiment folder)"),
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+) -> None:
+    """Import a OneSLAM trajectory: metric scale from depth, base poses, validation, rebuilt map + report."""
+    from .report import write_report
+    from .scene import import_oneslam
+
+    cfg = _cfg(config, sets)
+    sess = _session_path(session, cfg)
+    m = import_oneslam(sess, poses, cfg)
+    typer.echo(json.dumps(m, indent=2))
+    typer.echo(f"Report: {write_report(sess)}")
+
+
 @app.command("report")
 def report_cmd(
     session: Path = typer.Argument(None, help="Session folder (default: latest in ./sessions)"),

@@ -175,6 +175,37 @@ spoken alert.
 > works best when Stretch is following you (`--follow`). Don't rely on it as the only safety measure for
 > someone at real risk of falling.
 
+## Scene understanding (and OneSLAM)
+
+Each session also records **RGB-D keyframes** from the head camera (1 per second by default) with the head joint
+states and base odometry. The report gets a **Scene understanding** section:
+
+* a top-down map of the room: free floor, obstacles by height, Stretch's path, and an orange heat map of where the
+  person spent time
+* the free space around the person, the distance they walked, the floor area they used, and their distance to
+  Stretch
+* a 3-D viewer (`/sessions/<id>/scene3d`) and a PLY point-cloud download
+
+People are removed from the static map.
+
+For **camera-only localization** the same recording can be run through
+[OneSLAM](https://github.com/arcadelab/OneSLAM) on a machine with an NVIDIA GPU:
+
+```bash
+posture-coach scene export-oneslam <session>          # on the robot: OneSLAM input format
+./scripts/run_oneslam.sh ./stretch_<session>           # on the GPU machine (pinned OneSLAM commit)
+posture-coach scene import-oneslam <session> poses_pred.txt   # back on the robot
+```
+
+The import recovers metric scale from the depth camera, converts camera poses to base poses with the head joint
+states, and adds validation to the report (including "the base must not move when only the head moves").
+`posture-coach scene build <session>` rebuilds the map and report. The full workflow, status against the plan,
+and limitations are in **[docs/ONESLAM.md](docs/ONESLAM.md)**, and the plan itself in
+[docs/ONESLAM_PLAN.md](docs/ONESLAM_PLAN.md).
+
+Storage is about 350 MB per hour at 1 Hz. Set `scene.record_hz`, `scene.max_frames`, or `scene.record: false` to
+change it.
+
 ## Session report on the web
 
 **End session & save report** (button on the live page `:8080`, and on the VR page): closes the current session,
@@ -306,13 +337,13 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 82 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
+uv run pytest            # 91 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
 uv run ruff check .
 ```
 
 Layout: `src/stretch_posture_coach/` contains `camera.py`, `pose.py`, `biomech.py`, `ergonomics.py`,
 `assessment.py`, `coach.py`, `personas.py`, `follow.py`, `llm.py`, `speech.py`, `robot.py` + `robot_helper.py`, `visualize.py`,
-`stream.py`, `web.py`, `vr.py` + `web/vr.html`/`vr.js` (three.js r187 vendored), `certs.py`, `fall.py`, `alarm.py`, `logger.py`, `report.py`,
+`stream.py`, `web.py`, `vr.py` + `web/vr.html`/`vr.js` (three.js r187 vendored), `certs.py`, `fall.py`, `alarm.py`, `scene.py` + `web/scene3d.html`, `logger.py`, `report.py`,
 `pipeline.py` and `cli.py`.
 
 `robot_helper.py` (head only, or the whole robot with `--base` in follow mode) runs on the robot's **system** Python (`/usr/bin/python3`, which has Hello Robot's

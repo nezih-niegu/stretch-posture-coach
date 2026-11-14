@@ -16,7 +16,21 @@ RAW_FILES = {
     "config.yaml": "text/plain; charset=utf-8",
 }
 
+SCENE_FILES = {
+    "map.png": "image/png",
+    "scene.ply": "application/octet-stream",
+    "points.bin": "application/octet-stream",
+    "scene.json": "application/json",
+}
+
 Route = tuple[int, str, bytes]
+
+
+def _static(name: str) -> bytes | None:
+    from importlib import resources
+
+    f = resources.files("stretch_posture_coach").joinpath("web", *name.split("/"))
+    return f.read_bytes() if f.is_file() else None
 
 
 def list_sessions(sessions_dir: str | Path) -> list[Path]:
@@ -79,6 +93,12 @@ def route(
 ) -> Route | None:
     """Handle report/session URLs. Returns (status, content_type, body) or None if the path isn't ours."""
     path = path.split("?", 1)[0]
+    if path.startswith("/vendor/"):
+        name = path[len("/vendor/") :]
+        if "/" in name or name.startswith(".") or not name.endswith(".js"):
+            return 404, "text/plain", b"not found"
+        body = _static(f"vendor/{name}")
+        return (200, "text/javascript; charset=utf-8", body) if body else (404, "text/plain", b"not found")
     if path == "/report":
         report = current_report
         if report is None:
@@ -100,6 +120,10 @@ def route(
         return 404, "text/plain", b"not found"
     if rest in ("", "report.html"):
         return 200, "text/html; charset=utf-8", ensure_report(session).read_bytes()
+    if rest == "scene3d":
+        return 200, "text/html; charset=utf-8", _static("scene3d.html") or b""
+    if rest.startswith("scene/") and rest[6:] in SCENE_FILES and (session / rest).exists():
+        return 200, SCENE_FILES[rest[6:]], (session / rest).read_bytes()
     if rest in RAW_FILES and (session / rest).exists():
         return 200, RAW_FILES[rest], (session / rest).read_bytes()
     return 404, "text/plain", b"not found"

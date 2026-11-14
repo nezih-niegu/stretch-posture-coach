@@ -104,7 +104,7 @@ class WholeRobot:
         out = {"pan": self.head.status["head_pan"]["pos"], "tilt": self.head.status["head_tilt"]["pos"]}
         try:  # base odometry, for `posture-coach follow-test`
             b = self.robot.base.status
-            out["base_x"], out["base_theta"] = b.get("x"), b.get("theta")
+            out["base_x"], out["base_y"], out["base_theta"] = b.get("x"), b.get("y"), b.get("theta")
         except Exception:
             pass
         return out

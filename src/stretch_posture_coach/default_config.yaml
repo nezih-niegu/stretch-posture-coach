@@ -154,6 +154,24 @@ alarm:
   ntfy_server: https://ntfy.sh
   webhook_url: ""          # optional: POST JSON {event, reason, time, live_url} here (Slack/Teams/Home Assistant...)
 
+# Scene understanding: RGB-D keyframes + joint states are recorded with each session; the report builds a
+# static 3-D map of the room (people removed), where the person was and the free space around them.
+# The same recording can be exported to OneSLAM (camera-only SLAM, runs on a GPU machine).
+scene:
+  record: true
+  record_hz: 1             # keyframes per second (use 10 for sessions you want to run through OneSLAM)
+  depth_decimation: 2      # store depth at 1/2 resolution (240x320)
+  jpeg_quality: 85
+  max_frames: 3600         # per session (1 h at 1 Hz, ~350 MB)
+  voxel_m: 0.05            # map resolution
+  map_stride: 2            # use every 2nd depth pixel when fusing
+  min_hits: 2              # a voxel must be seen twice to be kept (noise / moving things)
+  max_map_frames: 600      # frames fused into the map (evenly sampled)
+  person_radius_m: 0.35    # carve this radius around where people stood out of the static map
+  pan_axis_x: 0.0          # head pan axis position in the base frame (m) - approximate
+  pan_axis_y: 0.0
+  camera_forward_m: 0.05   # camera optical centre ahead of the pan axis
+
 # VR telepresence for the Meta Quest browser: https://<robot>:8443/  (accept the certificate warning once)
 vr:
   enabled: true

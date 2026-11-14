@@ -79,6 +79,7 @@ class StretchHead:
         self.runstop: bool | None = None
         self.has_base = False
         self.base_x: float | None = None
+        self.base_y: float | None = None
         self.base_theta: float | None = None
         self._ready = threading.Event()
         self.error: str | None = None
@@ -123,7 +124,8 @@ class StretchHead:
             else:
                 self._pan, self._tilt = msg.get("pan"), msg.get("tilt")
                 self.runstop = msg.get("runstop")
-                self.base_x, self.base_theta = msg.get("base_x"), msg.get("base_theta")
+                self.base_x, self.base_y = msg.get("base_x"), msg.get("base_y")
+                self.base_theta = msg.get("base_theta")
 
     def _send(self, obj: dict):
         if self._proc.poll() is not None or self._proc.stdin is None:

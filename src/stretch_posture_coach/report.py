@@ -228,12 +228,111 @@ def make_charts(cols: dict, cfg: dict) -> list[tuple[str, str]]:
     return charts
 
 
+def scene_section(session_dir: Path, cfg: dict) -> str:
+    """'Scene understanding' block: static map (people removed), where the person was, free space, OneSLAM."""
+    from .scene import ONESLAM_REPO, build_scene, load_frames
+
+    if not load_frames(session_dir):
+        return ""
+    try:
+        sc = build_scene(session_dir, cfg)
+    except Exception as e:  # never lose the whole report over the map
+        return f"<h2>Scene understanding</h2><p class=muted>Scene map failed: {html.escape(str(e))}</p>"
+    if not sc or sc.get("empty"):
+        return (
+            "<h2>Scene understanding</h2><p class=muted>Keyframes were recorded but without depth, so no "
+            "map could be built.</p>"
+        )
+    img = ""
+    mp = session_dir / "scene" / "map.png"
+    if mp.exists():
+        img = (
+            f'<p><img alt="Top-down map" src="data:image/png;base64,{base64.b64encode(mp.read_bytes()).decode()}">'
+            "</p>"
+        )
+    src = {
+        "kinematic": "head joint states + wheel odometry (reference, not camera-only)",
+        "oneslam+kinematic": "OneSLAM camera-only trajectory (metric scale from depth)",
+    }.get(sc["source"], sc["source"])
+    rows = [
+        ("Pose source", src),
+        ("Keyframes (with depth)", f"{sc['frames']} ({sc['frames_with_depth']})"),
+        ("Observed floor area", f"{sc.get('observed_area_m2', '-')} m²"),
+        ("Free floor", f"{sc.get('free_floor_m2', '-')} m²"),
+        ("Obstacles (footprint)", f"{sc.get('obstacle_area_m2', '-')} m²"),
+        ("Mapped extent", " × ".join(f"{v} m" for v in sc.get("extent_m", []))),
+        ("Camera travel", f"{sc.get('camera_travel_m', 0)} m"),
+    ]
+    p = sc.get("person")
+    if p:
+        rows += [
+            ("Person: distance walked", f"{p['walked_m']} m"),
+            ("Person: floor area used", f"{p['area_used_m2']} m²"),
+            (
+                "Person: free space around them (mean / min)",
+                f"{p['clearance_mean_m']} / {p['clearance_min_m']} m"
+                if p["clearance_mean_m"] is not None
+                else "-",
+            ),
+            ("Person: mean distance to Stretch", f"{p['distance_to_robot_mean_m']} m"),
+            ("Person: posture samples", ", ".join(f"{k} {v}" for k, v in p["posture_samples"].items())),
+        ]
+    table = "".join(f"<tr><td>{html.escape(k)}</td><td>{html.escape(str(v))}</td></tr>" for k, v in rows)
+    os = sc.get("oneslam")
+    if os:
+        if os.get("metric"):
+            sc_ = os["scale"]
+            orow = [
+                (
+                    "Metric scale (from depth)",
+                    f"{sc_['scale']:.4f} ({sc_['pairs']} frame pairs, ±{sc_['spread_pct']}%)",
+                ),
+                (
+                    "Camera path vs. kinematic reference (RMSE / final)",
+                    f"{os['cam_vs_kinematic_rmse_m']} / {os['cam_vs_kinematic_final_m']} m",
+                ),
+                (
+                    "Head-only motion check (base must stay still)",
+                    f"{os.get('head_only_check') or 'no head-only segments'}"
+                    + (
+                        f" - max drift {os['head_only_base_drift_max_m']} m"
+                        if os.get("head_only_base_drift_max_m") is not None
+                        else ""
+                    ),
+                ),
+            ]
+        else:
+            orow = [("Status", os.get("note", "imported without metric scale"))]
+        os_html = (
+            "<h3>OneSLAM (camera-only localization)</h3><table>"
+            + "".join(f"<tr><td>{html.escape(k)}</td><td>{html.escape(str(v))}</td></tr>" for k, v in orow)
+            + "</table>"
+        )
+    else:
+        os_html = (
+            f"<p class=muted>Camera-only localization: export this session with <code>posture-coach scene "
+            f'export-oneslam {html.escape(session_dir.name)}</code>, run <a href="{ONESLAM_REPO}">OneSLAM</a> on a '
+            f"GPU machine (<code>scripts/run_oneslam.sh</code>), then <code>posture-coach scene import-oneslam</code>. "
+            f"See docs/ONESLAM.md.</p>"
+        )
+    return (
+        f"<h2>Scene understanding</h2>{img}"
+        "<p class=muted>Top-down view, Stretch's start at the black dot looking along the arrow. Light = free floor, "
+        "blue = obstacles (darker = taller), dark = not seen, orange = where the person spent time. People are removed "
+        "from the static map. "
+        f'<a href="/sessions/{session_dir.name}/scene3d">Open the 3-D view</a> · '
+        f'<a href="/sessions/{session_dir.name}/scene/scene.ply" download>download the point cloud (PLY)</a></p>'
+        f"<table>{table}</table>{os_html}"
+    )
+
+
 def write_report(session_dir: str | Path) -> Path:
     session_dir = Path(session_dir)
     cols, events, cfg = load_session(session_dir)
     summary = summarize(session_dir)
     (session_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     charts = make_charts(cols, cfg) if summary.get("samples") else []
+    scene_html = scene_section(session_dir, cfg)
 
     def table(d: dict) -> str:
         return (
@@ -276,6 +375,7 @@ RULA mean {summary.get("rula_mean", "-")} (max {summary.get("rula_max", "-")}), 
 <h2>Metrics (while in view)</h2><table><tr><th>Metric</th><th>Mean</th><th>P95 |x|</th><th>Max |x|</th><th>Limit</th>
 <th>Time over limit</th><th>Unit</th></tr>{rows}</table>
 <h2>Coaching by issue</h2><ul>{coach or "<li>none</li>"}</ul>{imgs}
+{scene_html}
 <h2>What Stretch said</h2><table><tr><th>Time</th><th>Why</th><th>Message</th><th>Source</th></tr>
 {transcript or "<tr><td colspan=4>Nothing.</td></tr>"}</table>
 <p class="muted">Estimates from monocular pose (MediaPipe) and a static segment model; intended for ergonomic coaching,

@@ -24,6 +24,7 @@ from .llm import OllamaClient, OllamaError
 from .logger import SessionLogger
 from .pose import PoseEstimator
 from .robot import make_head, wait_for_tilt
+from .scene import SceneRecorder
 from .speech import Speaker
 
 log = logging.getLogger(__name__)
@@ -202,6 +203,7 @@ class Pipeline:
                 log.info("Live view: http://%s:%d/", _host_ip(), self.streamer.port)
             except OSError as e:
                 log.warning("Could not start web viewer: %s", e)
+        self.scene_rec = self._new_scene_recorder()
         for srv in (self.streamer, self.vr):  # fall alarm: "I'm OK" buttons + snapshot; End-session button
             if srv is not None:
                 srv.on_ack = self.request_fall_ack
@@ -265,6 +267,7 @@ class Pipeline:
         else:
             fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
         self.follow_state = fs
+        self._record_scene(ts, frame, depth, intr, pose, raw, a.present)
         if self.follower.enabled:
             key = (fs.action, fs.note.split(" (")[0] if fs.action == "hold" else fs.note)
             if key != getattr(
@@ -433,6 +436,8 @@ class Pipeline:
         import cv2
 
         self.alarm.stop("session ended")
+        if self.scene_rec:
+            self.scene_rec.close()
         for fn in (self.speaker.close, self.head.close, self.source.close, self.estimator.close):
             try:
                 fn()
@@ -458,17 +463,48 @@ class Pipeline:
         old = self.logger
         old.event({"kind": "session_end", "by": who, "wall_time": time.time()})
         old.close()
+        if self.scene_rec:
+            self.scene_rec.close()
         self.logger = SessionLogger(
             self.cfg["logging"].get("sessions_dir", "sessions"),
             self.cfg,
             float(self.cfg["logging"].get("log_hz", 5)),
         )
         self.alarm.snapshot_dir = self.logger.dir
+        self.scene_rec = self._new_scene_recorder()
         log.info("Session %s ended (%s); new session %s started", old.dir.name, who, self.logger.dir.name)
         self._set_last_report(
             {"name": old.dir.name, "status": "building", "url": f"/sessions/{old.dir.name}/"}
         )
         threading.Thread(target=self._build_report, args=(old.dir,), daemon=True, name="report").start()
+
+    def _new_scene_recorder(self):
+        sc = self.cfg.get("scene", {})
+        if self.logger is None or not sc.get("record", True):
+            return None
+        return SceneRecorder(self.logger.dir, sc)
+
+    def _record_scene(self, ts, frame, depth, intr, pose, raw, present) -> None:
+        if self.scene_rec is None:
+            return
+        h = self.head
+        if getattr(h, "base_x", None) is not None:  # wheel odometry from stretch_body (follow / base mode)
+            base = (h.base_x, h.base_y or 0.0, h.base_theta or 0.0)
+        else:  # dead-reckoned follow steps (0, 0, 0 when the base never moves)
+            base = (self.follower.x, self.follower.y, self.follower.theta)
+        self.scene_rec.maybe_record(
+            ts,
+            frame,
+            depth,
+            intr,
+            h.pan,
+            h.tilt,
+            base,
+            pose if present else None,
+            (raw or {}).get("posture"),
+            self.min_vis,
+            {"fall": self.fall.state},
+        )
 
     def _build_report(self, session_dir: Path) -> None:
         from .report import summarize, write_report
