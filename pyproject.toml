@@ -1,0 +1,46 @@
+[project]
+name = "stretch-posture-coach"
+version = "0.1.0"
+description = "Full-body biomechanical posture analysis (MediaPipe) with spoken coaching from a Hello Robot Stretch 3 via a local LLM (Ollama / qwen2)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["stretch", "hello-robot", "mediapipe", "ergonomics", "rula", "reba", "ollama", "posture"]
+dependencies = [
+    "typer>=0.12",
+    "mediapipe>=0.10.30,<2",
+    "numpy>=1.26",
+    "opencv-contrib-python>=4.9",
+    "pyrealsense2>=2.54",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "matplotlib>=3.8",
+    "piper-tts>=1.2",
+]
+
+[project.scripts]
+posture-coach = "stretch_posture_coach.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008"]  # B008: typer.Option() defaults are the Typer idiom
+
+[tool.ruff.lint.per-file-ignores]
+"src/stretch_posture_coach/robot_helper.py" = ["UP"]  # runs on the robot's system python
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

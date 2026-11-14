@@ -1,0 +1,105 @@
+# Default configuration for stretch-posture-coach.
+# Copy to ./config.yaml (or pass --config FILE) and override only what you need;
+# user values are deep-merged on top of these defaults.
+
+camera:
+  source: realsense        # realsense | webcam | <path to video file>
+  realsense_name: "D435"   # substring of the RealSense device name (head cam on Stretch 3 is a D435i; the D405 is the gripper cam)
+  webcam_index: 0          # used when source == webcam (Stretch 3 nav camera is usually /dev/video6+, check `v4l2-ctl --list-devices`)
+  width: 640
+  height: 480
+  fps: 30
+  rotate: cw90             # Stretch head camera is mounted sideways. cw90 | ccw90 | 180 | none
+  pitch_deg: 0.0           # camera pitch (down = negative) used for gravity when robot head tilt is unavailable
+
+pose:
+  model: full              # lite | full | heavy  (full runs ~20-30 FPS on the NUC12 i5)
+  models_dir: models
+  min_detection_confidence: 0.5
+  min_presence_confidence: 0.5
+  min_tracking_confidence: 0.5
+  min_visibility: 0.5      # landmarks below this visibility are ignored
+
+subject:
+  body_mass_kg: 70.0       # used by the biomechanical load model
+  hand_load_kg: 0.0        # load held in EACH hand (e.g. lifting a box: total / 2)
+  arms_supported: false    # true if forearms rest on a desk / armrest (RULA/REBA -1 upper arm)
+
+analysis:
+  smoothing_alpha: 0.35    # EMA on metrics (0..1, higher = less smoothing)
+  static_posture_s: 60     # posture held > this -> RULA muscle-use / REBA activity +1
+  calibration_file: calibration.json
+
+# Thresholds for the coaching rules. Angles in degrees, distances in cm, forces in N.
+thresholds:
+  neck_flexion: 20         # head forward/down relative to trunk
+  neck_extension: 10       # head tilted back
+  neck_side_bend: 12
+  neck_twist: 25
+  trunk_flexion: 20        # leaning / slouching forward
+  trunk_extension: 15      # leaning back while standing
+  trunk_side_bend: 10
+  trunk_twist: 15
+  shoulder_tilt_cm: 4      # one shoulder higher than the other
+  upper_arm_elevation: 60  # arms raised
+  l5s1_compression_n: 3400 # NIOSH action limit
+  rula_high: 5             # RULA >= this is flagged
+  reba_high: 8             # REBA >= this is flagged
+  hold_s: 6                # a rule must be violated this long before Stretch speaks
+
+coach:
+  enabled: true
+  language: English        # language the robot speaks (e.g. English, Spanish)
+  robot_name: Stretch
+  user_name: ""            # optional, the coach will use it sometimes
+  min_interval_s: 25       # minimum time between any two spoken messages
+  repeat_interval_s: 75    # minimum time before coaching the same issue again
+  praise: true             # say something short when you fix an issue after being coached
+  praise_window_s: 20
+  break_reminder_min: 30   # remind to stand up / move after this long in view (0 = off)
+  greet: true
+
+llm:
+  enabled: true
+  host: http://localhost:11434   # Ollama on the robot; point to your laptop's IP to use a bigger model there
+  model: qwen2:1.5b              # qwen2:0.5b | qwen2:1.5b | qwen2:7b
+  temperature: 0.6
+  max_tokens: 70
+  timeout_s: 20
+  keep_alive: 30m
+
+speech:
+  enabled: true
+  engine: auto             # auto | piper | espeak | print
+  piper_voice: en_US-lessac-medium   # Spanish: es_MX-claude-high
+  voices_dir: models/piper
+  espeak_voice: en-us      # Spanish: es-419
+  rate_wpm: 165
+  volume: 1.0
+
+robot:
+  enabled: auto            # auto | true | false  (auto = only if stretch_body is importable)
+  python: /usr/bin/python3 # system python that has Hello Robot's stretch_body installed
+  head_tracking: true      # keep your torso centered with the head pan/tilt
+  initial_pan: null        # radians, null = leave head where it is
+  initial_tilt: null
+  track_hz: 4
+  deadband: 0.08           # fraction of the image (no motion if target is within this of center)
+  gain: 0.5
+  max_step_rad: 0.12
+  pan_sign: -1             # flip to +1 if the head turns AWAY from you
+  tilt_sign: -1            # flip to +1 if the head tilts the wrong way
+  hfov_deg: 42             # horizontal FOV of the (rotated) head camera image
+  vfov_deg: 69
+
+display:
+  window: auto             # auto | true | false  (auto = only if $DISPLAY is set)
+  stream: true             # MJPEG viewer at http://<robot>:<port>/
+  stream_host: 0.0.0.0
+  stream_port: 8080
+  jpeg_quality: 75
+
+logging:
+  enabled: true
+  sessions_dir: sessions
+  log_hz: 5

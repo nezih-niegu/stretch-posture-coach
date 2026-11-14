@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# runtime data
+models/
+sessions/
+config.yaml
+calibration.json
+check_snapshot.jpg
+*.part
+.ruff_cache/
+.pytest_cache/
