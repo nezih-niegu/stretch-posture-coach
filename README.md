@@ -163,6 +163,11 @@ alarm:
   webhook_url: ""                      # or POST JSON to Home Assistant / Slack / Teams / your server
 ```
 
+Test it any time with **`posture-coach alarm-test`**. It sends a real notification through the same code as the
+alarm (`--kind alarm` sends the urgent one, `--siren` also plays the siren). Notifications go over IPv4
+(`alarm.force_ipv4`), because the robot's network has broken IPv6. If no topic is configured, the log says so
+whenever a fall is detected.
+
 You get up to three pushes: **"possible fall"** (high priority) when Stretch starts asking, **"FALL DETECTED - no
 response"** (urgent) if the alarm goes off, and **"fall alert cleared"** when the person is OK again or someone
 acknowledges. Tapping a notification opens the robot's live view. Set `alarm.notify_on_check: false` to push
@@ -323,6 +328,7 @@ camera:  {rotate: cw90}
 | No phone notification | set `alarm.ntfy_topic` and subscribe to the same topic in the ntfy app; the robot needs internet access to reach ntfy.sh |
 | Quest: "Enter VR" greyed out | open the page with **https://**…:8443 (not http) and accept the certificate warning |
 | Quest: VR view is black / "connected - waiting for video" | a session must be running (`posture-coach run`); check the robot log for "VR viewer connected" |
+| VR looks busy / ghost copies of people | fixed: people are kept out of the scene memory, depth is cleaned (median filter, edge "flying pixels", > 4.5 m dropped), and only 8 memories are kept, fading after 2 min. Press B/Y to turn memory off, or untick "wide-camera backdrop". |
 | VR: the wide-angle backdrop is sideways or mirrored | set `vr.nav_rotate` (cw90/ccw90/180) and `vr.nav_hfov_deg`; disable with `vr.nav_camera: false` |
 | Messages are slow | Normal first time (model load). Use `qwen2:0.5b`, or run Ollama on your laptop: `--host http://<laptop-ip>:11434`. On the laptop, start it with `OLLAMA_HOST=0.0.0.0 ollama serve`. |
 | Angles look off | calibrate; prefer a side view; make sure your whole body is visible. |
@@ -337,7 +343,7 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 91 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
+uv run pytest            # 93 tests: geometry, RULA/REBA, load model, follow, fall detection/alarm, personas, web, VR, end-to-end
 uv run ruff check .
 ```
 

@@ -53,6 +53,26 @@ CONTENT_TYPES = {
 }
 
 
+PERSON_BIT = 0x8000  # depth values are mm in the low 15 bits (max 32.7 m); bit 15 = person pixel
+
+
+def clean_depth_mm(depth_m: np.ndarray, dw: int, dh: int, max_range_m: float = 4.5) -> np.ndarray:
+    """Decimate D435 depth for the headset without the usual artifacts:
+    5x5 median (speckle), drop 'flying pixels' at object edges (big local depth range), drop far/noisy depth."""
+    mm = np.clip(np.nan_to_num(depth_m) * 1000.0, 0, 32767).astype(np.uint16)
+    mm = cv2.medianBlur(mm, 5)
+    d = cv2.resize(mm, (dw, dh), interpolation=cv2.INTER_NEAREST)
+    valid = d > 0
+    k = np.ones((3, 3), np.uint8)
+    big = np.where(valid, d, 0).astype(np.uint16)
+    small = np.where(valid, d, 32767).astype(np.uint16)
+    rng = cv2.dilate(big, k).astype(np.int32) - cv2.erode(small, k).astype(np.int32)
+    flying = valid & (rng > 0.06 * d.astype(np.int32) + 30)  # >6 % jump around the pixel = edge
+    d[flying] = 0
+    d[d > int(max_range_m * 1000)] = 0
+    return d.astype("<u2")
+
+
 def pack(msg_type: int, meta: dict, *chunks: bytes, length_prefixed: int = 0) -> bytes:
     """[u8 type][u32 len][json] then chunks; the first ``length_prefixed`` chunks get a u32 length prefix."""
     js = json.dumps(meta, separators=(",", ":"), default=float).encode()
@@ -419,15 +439,20 @@ class VRServer:
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
         dw, dh = max(2, w // self.decim), max(2, h // self.decim)
         depth = it["depth"]
+        pose = it["pose"]
         if depth is not None and depth.shape[:2] == (h, w):
-            d = cv2.resize(depth, (dw, dh), interpolation=cv2.INTER_NEAREST)
-            dmm = np.clip(np.nan_to_num(d * 1000.0), 0, 65535).astype("<u2")
+            dmm = clean_depth_mm(depth, dw, dh, float(self.c.get("max_range_m", 4.5)))
+            if (
+                pose is not None
+            ):  # flag person pixels (bit 15): the headset keeps them out of the scene memory
+                from .scene import person_mask
+
+                dmm[person_mask(pose, (dh, dw), it["min_vis"]) > 0] |= PERSON_BIT
             has_depth = True
         else:  # no depth: show the image as a flat screen 2.5 m away
             dmm = np.full((dh, dw), 2500, "<u2")
             has_depth = False
         skel = None
-        pose = it["pose"]
         if pose is not None and has_depth:
             skel = landmarks_3d(pose.image, pose.visibility, depth, intr, it["min_vis"])
         meta = {

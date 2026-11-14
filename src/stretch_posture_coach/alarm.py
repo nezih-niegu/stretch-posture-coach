@@ -19,6 +19,30 @@ from .speech import Speaker, _play_wav
 log = logging.getLogger(__name__)
 
 
+TITLES_EN = {
+    "check": ("Stretch: possible fall", "high", "warning"),
+    "alarm": ("Stretch: FALL DETECTED - no response", "urgent", "rotating_light"),
+    "resolved": ("Stretch: fall alert cleared", "default", "white_check_mark"),
+    "test": ("Stretch: test notification", "default", "bell"),
+}
+TITLES_ES = {
+    "check": ("Stretch: posible caida", "high", "warning"),
+    "alarm": ("Stretch: CAIDA DETECTADA - sin respuesta", "urgent", "rotating_light"),
+    "resolved": ("Stretch: alerta de caida resuelta", "default", "white_check_mark"),
+    "test": ("Stretch: notificacion de prueba", "default", "bell"),
+}  # ntfy titles are HTTP headers: keep them ASCII (the message body can be any UTF-8)
+
+
+def force_ipv4() -> None:
+    """Make requests/urllib3 use IPv4 only. On networks with broken IPv6 (like the robot's) Python otherwise
+    tries IPv6 first and the notification can stall until it times out."""
+    import socket
+
+    import urllib3.util.connection as uc
+
+    uc.allowed_gai_family = lambda: socket.AF_INET
+
+
 def siren_wav(seconds: float = 2.4, rate: int = 22050) -> bytes:
     """Two-tone (960/770 Hz) alarm, 0.3 s per tone, square-ish for loudness."""
     t = np.arange(int(seconds * rate)) / rate
@@ -44,8 +68,12 @@ class Alarm:
         templates: dict,
         live_url: str = "",
         snapshot_dir: str | Path | None = None,
+        spanish: bool = False,
     ):
         self.c = cfg
+        self.spanish = spanish
+        if cfg.get("force_ipv4", True):
+            force_ipv4()
         self.speaker = speaker
         self.templates = templates
         self.live_url = live_url
@@ -123,12 +151,18 @@ class Alarm:
 
     def notify(self, kind: str, reason: str) -> None:
         """kind: "check" (possible fall, asking), "alarm" (no response), "resolved"."""
-        title, priority, tags = {
-            "check": ("Stretch: possible fall", "high", "warning"),
-            "alarm": ("Stretch: FALL DETECTED - no response", "urgent", "rotating_light"),
-        }.get(kind, ("Stretch: fall alert cleared", "default", "white_check_mark"))
-        text = f"{reason}. Live view: {self.live_url}" if self.live_url else reason
+        titles = TITLES_ES if self.spanish else TITLES_EN
+        title, priority, tags = titles.get(kind, titles["resolved"])
+        when = time.strftime("%H:%M:%S")
+        live = "Vista en vivo" if self.spanish else "Live view"
+        text = f"{when} - {reason}." + (f"\n{live}: {self.live_url}" if self.live_url else "")
         topic = str(self.c.get("ntfy_topic") or "").strip()
+        if not topic and not str(self.c.get("webhook_url") or "").strip() and kind != "resolved":
+            log.warning(
+                "Fall %s: no phone notification sent - set alarm.ntfy_topic in config.yaml "
+                "(see README: Fall detection)",
+                kind,
+            )
         if topic:
             url = f"{str(self.c.get('ntfy_server', 'https://ntfy.sh')).rstrip('/')}/{topic}"
             headers = {
@@ -146,15 +180,21 @@ class Alarm:
             ).encode()
             self._post(hook, body, {"Content-Type": "application/json"}, "webhook")
 
-    def _post(self, url: str, body: bytes, headers: dict, name: str) -> None:
-        try:
-            r = requests.post(url, data=body, headers=headers, timeout=10)
-            self.sent_notifications.append({"to": name, "status": r.status_code})
-            if r.status_code >= 400:
+    def _post(self, url: str, body: bytes, headers: dict, name: str, attempts: int = 2) -> bool:
+        for attempt in range(1, attempts + 1):
+            try:
+                r = requests.post(url, data=body, headers=headers, timeout=8)
+                self.sent_notifications.append({"to": name, "status": r.status_code})
+                if r.status_code < 400:
+                    log.info("%s notification sent: %s", name, headers.get("Title", ""))
+                    return True
                 log.error("%s notification failed: HTTP %s %s", name, r.status_code, r.text[:200])
-        except requests.RequestException as e:
-            self.sent_notifications.append({"to": name, "error": str(e)})
-            log.error("%s notification failed: %s", name, e)
+            except requests.RequestException as e:
+                self.sent_notifications.append({"to": name, "error": str(e)})
+                log.error("%s notification failed (attempt %d): %s", name, attempt, e)
+            if attempt < attempts:
+                time.sleep(2)
+        return False
 
     def status(self) -> dict:
         return {"active": self.active, "reason": self.reason, "since": self.started_at}

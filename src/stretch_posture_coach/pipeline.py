@@ -168,6 +168,7 @@ class Pipeline:
             self.coach.templates,
             live_url=f"http://{_host_ip()}:{cfg['display'].get('stream_port', 8080)}/",
             snapshot_dir=self.logger.dir if self.logger else None,
+            spanish=self.coach.persona.spanish,
         )
         self.window = _want_window(cfg) if window is None else window
         sessions_dir = cfg["logging"].get("sessions_dir", "sessions")
@@ -507,11 +508,23 @@ class Pipeline:
         )
 
     def _build_report(self, session_dir: Path) -> None:
-        from .report import summarize, write_report
+        import multiprocessing as mp
+
+        from .report import build_report_job, summarize
 
         with _REPORT_LOCK:
             try:
-                write_report(session_dir)
+                # separate process: matplotlib + map fusion must not stall the camera loop or the VR stream
+                proc = mp.get_context("spawn").Process(
+                    target=build_report_job, args=(str(session_dir),), name="report", daemon=True
+                )
+                proc.start()
+                proc.join(timeout=900)
+                if proc.is_alive():
+                    proc.terminate()
+                    raise RuntimeError("report build timed out")
+                if proc.exitcode != 0 or not (session_dir / "report.html").exists():
+                    raise RuntimeError(f"report process exited with {proc.exitcode}")
                 sm = summarize(session_dir)
                 self._set_last_report(
                     {

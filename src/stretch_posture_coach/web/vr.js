@@ -118,11 +118,16 @@ class Surface {
     this.mesh.matrixAutoUpdate = false;
     this.mesh.frustumCulled = false;
     this.bitmap = null;
+    this.person = new Uint8Array(dw * dh);  // 1 = person pixel (never kept in the scene memory)
     this.yaw = 0; this.pitch = 0; this.time = 0;
   }
   update(meta, depthMM, bitmap) {
     const d = this.depth.image.data;
-    for (let i = 0; i < d.length; i++) d[i] = depthMM[i] * 0.001;
+    for (let i = 0; i < d.length; i++) {
+      const v = depthMM[i];
+      this.person[i] = v & 0x8000 ? 1 : 0;
+      d[i] = (v & 0x7fff) * 0.001;
+    }
     this.depth.needsUpdate = true;
     if (this.bitmap && this.bitmap !== bitmap && !this.keepBitmap) this.bitmap.close();
     this.bitmap = bitmap;
@@ -136,8 +141,9 @@ class Surface {
     this.mesh.matrixWorldNeedsUpdate = true;
   }
   cloneAsMemory() {
-    const s = new Surface(this.dw, this.dh, 0.55);
-    s.depth.image.data.set(this.depth.image.data);
+    const s = new Surface(this.dw, this.dh, 0.6);
+    const src = this.depth.image.data, dst = s.depth.image.data;
+    for (let i = 0; i < dst.length; i++) dst[i] = this.person[i] ? 0 : src[i];  // people are not "scenery"
     s.depth.needsUpdate = true;
     s.color.image = this.bitmap; s.color.needsUpdate = true; s.bitmap = this.bitmap;
     this.keepBitmap = false; s.keepBitmap = true;
@@ -158,11 +164,14 @@ class Surface {
 let live = null;
 const memory = [];          // older views kept around you (dimmed)
 let memoryOn = true;
-const MAX_MEMORY = 18;
+const MAX_MEMORY = 8;
+const MEMORY_MAX_AGE_MS = 120000;  // older views fade out and are dropped
+let stableFrames = 0, lastPose = null;
 const angDist = (a, b) => Math.hypot(Math.atan2(Math.sin(a.yaw - b.yaw), Math.cos(a.yaw - b.yaw)), a.pitch - b.pitch);
 
 function rememberLive() {
   if (!live || !live.bitmap) return;
+  if (stableFrames < 3) return;  // only remember sharp views: the head has been still for a few frames
   const near = memory.filter((m) => angDist(m, live) < THREE.MathUtils.degToRad(15));
   const fresh = near.some((m) => performance.now() - m.time < 20000);
   if (fresh) return;
@@ -178,7 +187,14 @@ function rememberLive() {
 function updateMemoryVisibility() {
   for (const m of memory) {
     // hide memories the live view is covering (avoids double images); everything else stays as context
-    m.mesh.visible = memoryOn && (!live || angDist(m, live) > THREE.MathUtils.degToRad(25));
+    const age = performance.now() - m.time;
+    m.material.uniforms.brightness.value = 0.6 * Math.max(0.25, 1 - age / MEMORY_MAX_AGE_MS);
+    m.mesh.visible = memoryOn && (!live || angDist(m, live) > THREE.MathUtils.degToRad(35));
+  }
+  for (let i = memory.length - 1; i >= 0; i--) {
+    if (performance.now() - memory[i].time > MEMORY_MAX_AGE_MS) {
+      world.remove(memory[i].mesh); memory[i].dispose(); memory.splice(i, 1);
+    }
   }
 }
 
@@ -262,12 +278,12 @@ function ensureNav(meta) {
   const hfov = THREE.MathUtils.degToRad(meta.hfov || 120), vfov = THREE.MathUtils.degToRad(meta.vfov || 90);
   if (nav && nav.userData.key === `${meta.hfov}/${meta.vfov}`) return;
   if (nav) { world.remove(nav); nav.geometry.dispose(); }
-  const r = 8;
+  const r = 12;
   const geo = new THREE.CylinderGeometry(r, r, 2 * r * Math.tan(vfov / 2), 48, 1, true, Math.PI - hfov / 2, hfov);
   const uv = geo.attributes.uv;
   for (let i = 0; i < uv.count; i++) { uv.setX(i, 1 - uv.getX(i)); uv.setY(i, 1 - uv.getY(i)); }
   nav = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: navTex, side: THREE.BackSide, depthWrite: false,
-    color: 0x9a9a9a }));
+    color: 0x6e6e6e }));  // dim: peripheral context only, the 3-D scene stays in front
   nav.renderOrder = -5;
   nav.matrixAutoUpdate = false;
   nav.userData.key = `${meta.hfov}/${meta.vfov}`;
@@ -424,6 +440,10 @@ async function handleBinary(buf, type) {
       live = new Surface(meta.dw, meta.dh, 1.0);
       world.add(live.mesh);
     }
+    if (lastPose && Math.abs(lastPose.yaw - meta.yaw) < 0.015 && Math.abs(lastPose.pitch - meta.pitch) < 0.015) {
+      stableFrames++;
+    } else stableFrames = 0;
+    lastPose = { yaw: meta.yaw, pitch: meta.pitch };
     if (memoryOn && live.bitmap && meta.has_depth) rememberLive();
     live.update(meta, depth, bitmap);
     updateSkeleton(meta);
@@ -446,6 +466,7 @@ async function handleBinary(buf, type) {
     if (navTex.image && navTex.image.close) navTex.image.close();
     navTex.image = bitmap; navTex.needsUpdate = true;
     ensureNav(meta);
+    nav.visible = $('navtoggle') ? $('navtoggle').checked : true;
     if (live) { nav.matrix.copy(poseMatrix(live.yaw, live.pitch)); nav.matrixWorldNeedsUpdate = true; }
   }
 }

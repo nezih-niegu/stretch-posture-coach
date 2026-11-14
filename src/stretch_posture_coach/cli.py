@@ -206,6 +206,62 @@ def follow(
     _run_pipeline(cfg, duration, report=coach)
 
 
+@app.command("alarm-test")
+def alarm_test(
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+    kind: str = typer.Option("test", help="test | check | alarm | resolved (which notification to send)"),
+    siren: bool = typer.Option(False, "--siren", help="Also play the siren once through the speaker"),
+) -> None:
+    """Send a fall-alarm phone notification (ntfy / webhook) exactly like a real alarm would."""
+    _setup_logging(False)
+    cfg = _cfg(config, sets)
+    _localize(cfg)
+    from .alarm import Alarm, siren_wav
+    from .personas import resolve
+    from .pipeline import _host_ip
+
+    a = cfg.get("alarm", {})
+    topic = str(a.get("ntfy_topic") or "").strip()
+    if not topic and not str(a.get("webhook_url") or "").strip():
+        typer.echo(
+            "No alarm.ntfy_topic (or webhook_url) in config.yaml - nothing to send.\n"
+            "Add to config.yaml:\n\nalarm:\n  ntfy_topic: <your-topic>\n"
+        )
+        raise typer.Exit(1)
+    spanish = resolve(cfg["coach"]).spanish
+    al = Alarm(
+        a,
+        None,
+        {},
+        live_url=f"http://{_host_ip()}:{cfg['display'].get('stream_port', 8080)}/",
+        spanish=spanish,
+    )
+    reason = (
+        ("Prueba de notificación de caída" if spanish else "Fall alarm notification test")
+        if kind == "test"
+        else ("Prueba: " if spanish else "Test: ") + kind
+    )
+    al.notify(kind, reason)
+    ok = [n for n in al.sent_notifications if n.get("status", 999) < 400]
+    for n in al.sent_notifications:
+        typer.echo(f"  {n['to']}: " + (f"HTTP {n['status']}" if "status" in n else f"ERROR {n['error']}"))
+    if siren:
+        import tempfile
+
+        from .speech import _play_wav
+
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            f.write(siren_wav(2.0))
+            f.flush()
+            _play_wav(f.name, float(a.get("volume", 1.5)))
+    if ok:
+        typer.echo(f"Sent to ntfy topic '{topic}'. Check your phone." if topic else "Sent.")
+    else:
+        typer.echo("Sending failed (see errors above). Test the network: curl -4 -d test ntfy.sh/<topic>")
+        raise typer.Exit(1)
+
+
 @app.command("follow-test")
 def follow_test(
     config: Path = ConfigOpt,

@@ -166,7 +166,8 @@ def test_vr_websocket_protocol(vr):
             jpeg, dbytes = rest[4 : 4 + jl], rest[4 + jl :]
             assert jpeg[:2] == b"\xff\xd8"
             d = np.frombuffer(dbytes, "<u2")
-            assert d.size == 120 * 160 and np.all(d == 2500)
+            assert d.size == 120 * 160 and np.all((d & 0x7FFF) == 2500)
+            assert 0 < np.count_nonzero(d & 0x8000) < d.size  # person pixels flagged (kept out of VR memory)
 
             await ws.send(json.dumps({"type": "look", "yaw": 0.5, "pitch": -0.1, "active": True}))
             await asyncio.sleep(0.2)
@@ -366,7 +367,7 @@ def test_end_session_button_rotates_and_builds_report(tmp_path):
     for _ in range(25):  # keeps running: the next frame rotates the session
         p.step(*src.read())
     assert p.logger.dir != first and (p.logger.dir / "metrics.csv").exists()
-    for _ in range(100):
+    for _ in range(600):  # report is built in a separate process
         if (p.last_report or {}).get("status") == "ready":
             break
         time.sleep(0.05)
@@ -379,3 +380,18 @@ def test_end_session_button_rotates_and_builds_report(tmp_path):
     assert ev[-1]["kind"] == "session_end" and ev[-1]["by"] == "web button"
     p.close()
     p.close_servers()
+
+
+def test_clean_depth_removes_speckle_flying_pixels_and_far_depth():
+    from stretch_posture_coach.vr import clean_depth_mm
+
+    d = np.full((640, 480), 3.0, np.float32)
+    d[:, 240:] = 1.5  # foreground object: a sharp depth edge down the middle
+    d[100, 100] = 0.4  # speckle
+    d[:, 240] = 2.2  # 'flying pixels' between foreground and background
+    d[600:, :] = 7.0  # far, noisy depth
+    out = clean_depth_mm(d, 120, 160, max_range_m=4.5)
+    assert out[25, 25] == 3000  # speckle gone (median)
+    assert np.all(out[:140, 60] == 0)  # flying pixels at the edge dropped
+    assert np.all(out[:140, 100] == 1500) and np.all(out[:140, 20] == 3000)  # surfaces kept
+    assert np.all(out[152:, :] == 0)  # beyond max range dropped

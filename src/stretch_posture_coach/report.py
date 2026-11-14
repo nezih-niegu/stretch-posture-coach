@@ -391,3 +391,15 @@ def latest_session(sessions_dir: str | Path = "sessions") -> Path | None:
         return None
     subs = sorted([p for p in d.iterdir() if (p / "metrics.csv").exists()])
     return subs[-1] if subs else None
+
+
+def build_report_job(session_dir: str) -> None:
+    """Entry point for a separate, low-priority process (End-session button): builds the scene map, charts and
+    report without competing with the live camera / VR loop for the interpreter."""
+    import os
+
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    write_report(session_dir)

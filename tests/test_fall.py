@@ -366,3 +366,20 @@ def test_coach_drops_inflight_tip_when_muted():
     c._t = 41.0
     c._speak("Sit up straight!", {"kind": "issue"})
     assert sp.said[-1] == "Sit up straight!"
+
+
+def test_alarm_test_command_sends_notification(monkeypatch):
+    from typer.testing import CliRunner
+
+    from stretch_posture_coach.cli import app
+
+    srv, got = _ntfy_server()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    r = CliRunner().invoke(
+        app, ["alarm-test", "--kind", "alarm", "-s", "alarm.ntfy_topic=t", "-s", f"alarm.ntfy_server={base}"]
+    )
+    srv.shutdown()
+    assert r.exit_code == 0, r.output
+    assert got[0][0]["Title"] == "Stretch: FALL DETECTED - no response" and got[0][0]["Priority"] == "urgent"
+    r = CliRunner().invoke(app, ["alarm-test", "-s", "alarm.ntfy_topic="])
+    assert r.exit_code == 1 and "ntfy_topic" in r.output
