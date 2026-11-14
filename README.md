@@ -5,8 +5,6 @@ watches you with its head camera, estimates joint angles, **RULA / REBA** ergono
 (L5/S1 compression, neck load). When a bad posture lasts too long, it **tells you out loud** how to fix it,
 using a local LLM (**Ollama + qwen2**) and an offline neural voice (Piper, with espeak-ng as fallback).
 
-Everything runs on the robot (NUC12 i5-1240P). No cloud.
-
 ```
  D435i head camera ──► MediaPipe Pose Landmarker (33 3-D landmarks, ~25 FPS)
                               │
