@@ -1,9 +1,13 @@
 # stretch-posture-coach
 
+![Stretch Posture Coach: sense, understand, act, share](docs/visual_abstract.svg)
+
 Full-body biomechanical posture analysis with **MediaPipe Pose** on a **Hello Robot Stretch 3**. Stretch
 watches you with its head camera, estimates joint angles, **RULA / REBA** ergonomic risk and spinal loads
 (L5/S1 compression, neck load). When a bad posture lasts too long, it **tells you out loud** how to fix it,
 using a local LLM (**Ollama + qwen2**) and an offline neural voice (Piper, with espeak-ng as fallback).
+
+Everything runs on the robot (NUC12 i5-1240P). No cloud.
 
 ```
  D435i head camera ──► MediaPipe Pose Landmarker (33 3-D landmarks, ~25 FPS)
@@ -108,7 +112,7 @@ straight over the front of the base" on your robot; if the body turns the wrong 
 `robot.pan_sign` is off. Start with `posture-coach follow`, walk slowly, and watch the distance in the web
 viewer.
 
-## En español 
+## En español / norteño de la sierra
 
 ```bash
 posture-coach norteno-setup                 # once: custom Ollama model "stretch-norteno" + Mexican voice
