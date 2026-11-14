@@ -23,6 +23,9 @@ class FrameSource:
     """Yields ``(bgr_frame, timestamp_s)``; frames are already rotated upright."""
 
     is_live = True
+    last_depth: np.ndarray | None = (
+        None  # meters (float32), aligned to the color frame and rotated the same way
+    )
 
     def __init__(self, rotate: str = "none"):
         self._rot = _ROTATIONS.get(str(rotate).lower())
@@ -51,6 +54,7 @@ class RealSenseSource(FrameSource):
         height: int = 480,
         fps: int = 30,
         rotate: str = "cw90",
+        depth: bool = True,
     ):
         super().__init__(rotate)
         try:
@@ -74,15 +78,27 @@ class RealSenseSource(FrameSource):
         cfg = rs.config()
         cfg.enable_device(serial)
         cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        self._depth = bool(depth)
+        if self._depth:
+            cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
         try:
-            self._pipe.start(cfg)
+            profile = self._pipe.start(cfg)
         except RuntimeError as e:  # pragma: no cover - hardware path
             raise CameraError(
                 f"Could not start {self.device_name} ({serial}): {e}. Is another process using it?"
             ) from e
+        if self._depth:
+            self._depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+            self._align = rs.align(rs.stream.color)
 
     def read(self):
         frames = self._pipe.wait_for_frames(timeout_ms=5000)
+        if self._depth:
+            frames = self._align.process(frames)
+            d = frames.get_depth_frame()
+            if d:
+                depth_m = np.asanyarray(d.get_data()).astype(np.float32) * self._depth_scale
+                self.last_depth = self._rotate(depth_m)
         color = frames.get_color_frame()
         if not color:
             return None, time.monotonic()
@@ -130,7 +146,9 @@ def open_source(cam_cfg: dict, source: str | None = None) -> FrameSource:
     w, h, fps = int(cam_cfg.get("width", 640)), int(cam_cfg.get("height", 480)), int(cam_cfg.get("fps", 30))
     rotate = cam_cfg.get("rotate", "none")
     if src == "realsense":
-        return RealSenseSource(cam_cfg.get("realsense_name", "D435"), w, h, fps, rotate)
+        return RealSenseSource(
+            cam_cfg.get("realsense_name", "D435"), w, h, fps, rotate, bool(cam_cfg.get("depth", True))
+        )
     if src == "webcam" or src.startswith("webcam:") or src.isdigit():
         idx = (
             int(src.split(":", 1)[1])

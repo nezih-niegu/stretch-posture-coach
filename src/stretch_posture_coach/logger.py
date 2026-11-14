@@ -48,6 +48,9 @@ COLUMNS = [
     "neck_load_kg",
     "max_shoulder_moment_nm",
     "head_tilt_rad",
+    "distance_m",
+    "distance_source",
+    "follow_action",
 ]
 
 
@@ -65,7 +68,7 @@ class SessionLogger:
         self._last = -1e9
         self._rows = 0
 
-    def log(self, a: Assessment, head_tilt: float | None = None) -> None:
+    def log(self, a: Assessment, head_tilt: float | None = None, follow=None) -> None:
         if a.t - self._last < self._period:
             return
         self._last = a.t
@@ -75,6 +78,14 @@ class SessionLogger:
             "present": int(a.present),
             "head_tilt_rad": None if head_tilt is None else round(head_tilt, 3),
         }
+        if follow is not None:
+            row.update(
+                {
+                    "distance_m": follow.distance,
+                    "distance_source": follow.source,
+                    "follow_action": follow.action,
+                }
+            )
         if a.present:
             row.update({k: a.metrics.get(k) for k in COLUMNS if k in a.metrics})
             row["posture"] = a.metrics.get("posture")

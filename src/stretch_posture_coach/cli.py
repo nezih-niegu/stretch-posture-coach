@@ -1,4 +1,4 @@
-"""Command-line interface: ``posture-coach run | calibrate | check | report | say | download-models | init-config``."""
+"""Command-line interface: ``posture-coach run | follow | calibrate | check | report | say | norteno-setup | ...``."""
 
 from __future__ import annotations
 
@@ -44,6 +44,55 @@ def _cfg(config: Path | None, sets: list[str] | None, **direct) -> dict:
     return load_config(config, overrides)
 
 
+NORTENO_MODEL = "stretch-norteno"
+SPANISH_VOICE = "es_MX-claude-high"
+
+
+def _localize(cfg: dict, norteno: bool = False) -> None:
+    """Switch persona/voices for Spanish. With --norteno, also use the custom Ollama model if it exists."""
+    c = cfg["coach"]
+    if norteno:
+        c["persona"], c["language"] = "norteno", "Spanish"
+    spanish = str(c.get("language", "")).lower().startswith(("span", "espa")) or c.get("persona") == "norteno"
+    if spanish:
+        if str(cfg["speech"].get("piper_voice", "")).startswith("en_"):
+            cfg["speech"]["piper_voice"] = SPANISH_VOICE
+        if str(cfg["speech"].get("espeak_voice", "")).startswith("en"):
+            cfg["speech"]["espeak_voice"] = "es-419"
+    if c.get("persona") == "norteno" and str(cfg["llm"].get("model", "")).startswith("qwen2"):
+        from .llm import OllamaClient, OllamaError
+
+        try:
+            names = OllamaClient.from_config(cfg["llm"]).list_models()
+            if any(n.split(":")[0] == NORTENO_MODEL for n in names):
+                cfg["llm"]["model"] = NORTENO_MODEL
+            else:
+                logging.getLogger(__name__).info(
+                    "Custom model %s not found (run `posture-coach norteno-setup`); using %s with the norteño prompt",
+                    NORTENO_MODEL,
+                    cfg["llm"]["model"],
+                )
+        except OllamaError:
+            pass
+
+
+def _run_pipeline(cfg: dict, duration: float | None, report: bool) -> None:
+    from .pipeline import Pipeline
+
+    session = Pipeline(cfg).run(duration_s=duration)
+    if session and report:
+        from .report import summarize, write_report
+
+        out = write_report(session)
+        s = summarize(session)
+        typer.echo(f"\nSession saved to {session}")
+        typer.echo(f"Report: {out}")
+        typer.echo(
+            f"In view {s.get('in_view_min', 0)} min | RULA mean {s.get('rula_mean', '-')} | "
+            f"REBA mean {s.get('reba_mean', '-')} | coaching messages {s.get('coaching_messages', 0)}"
+        )
+
+
 @app.command()
 def run(
     config: Path = ConfigOpt,
@@ -52,6 +101,10 @@ def run(
     model: str = typer.Option(None, help="Ollama model, e.g. qwen2:1.5b or qwen2:7b"),
     host: str = typer.Option(None, help="Ollama URL, e.g. http://192.168.1.20:11434 to use your laptop"),
     language: str = typer.Option(None, help="Language Stretch speaks (English, Spanish, ...)"),
+    norteno: bool = typer.Option(
+        False, "--norteno", help="Spanish norteño de la sierra persona (custom model)"
+    ),
+    follow: bool = typer.Option(False, "--follow", help="Also turn/drive the base to face you at 2-3 m"),
     mass: float = typer.Option(None, "--mass", help="Your body mass in kg (load model)"),
     no_voice: bool = typer.Option(False, "--no-voice", help="Print messages instead of speaking"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Use rule-based messages only"),
@@ -84,24 +137,99 @@ def run(
         cfg["display"]["stream"] = False
     if window is not None:
         cfg["display"]["window"] = window
+    if follow:
+        cfg["follow"]["enabled"] = True
+        cfg["robot"]["enabled"] = True
+    _localize(cfg, norteno)
     if calibrate_first:
         from .pipeline import calibrate as do_calibrate
 
         do_calibrate(cfg)
-    from .pipeline import Pipeline
+    _run_pipeline(cfg, duration, report)
 
-    session = Pipeline(cfg).run(duration_s=duration)
-    if session and report:
-        from .report import summarize, write_report
 
-        out = write_report(session)
-        s = summarize(session)
-        typer.echo(f"\nSession saved to {session}")
-        typer.echo(f"Report: {out}")
-        typer.echo(
-            f"In view {s.get('in_view_min', 0)} min | RULA mean {s.get('rula_mean', '-')} | "
-            f"REBA mean {s.get('reba_mean', '-')} | coaching messages {s.get('coaching_messages', 0)}"
+@app.command()
+def follow(
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+    target: float = typer.Option(None, help="Preferred distance in m (default 2.5)"),
+    coach: bool = typer.Option(False, "--coach/--no-coach", help="Also give posture coaching"),
+    norteno: bool = typer.Option(
+        False, "--norteno", help="Spanish norteño persona for anything Stretch says"
+    ),
+    language: str = typer.Option(None, help="Language for spoken notices (English, Spanish)"),
+    no_stream: bool = typer.Option(False, "--no-stream"),
+    duration: float = typer.Option(None, help="Stop after N seconds"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Face the person and keep a safe 2-3 m distance with the mobile base (head tracks, base turns/drives).
+
+    SAFETY: clear the floor around the robot, keep the runstop (head button) in reach. Ctrl+C stops."""
+    _setup_logging(verbose)
+    cfg = _cfg(config, sets, follow__target_m=target, coach__language=language)
+    cfg["follow"]["enabled"] = True
+    cfg["robot"]["enabled"] = True
+    cfg["coach"]["enabled"] = coach
+    if no_stream:
+        cfg["display"]["stream"] = False
+    _localize(cfg, norteno)
+    _run_pipeline(cfg, duration, report=coach)
+
+
+@app.command("norteno-setup")
+def norteno_setup(
+    base: str = typer.Option(
+        "qwen2:1.5b", help="Base model, e.g. qwen2:1.5b (fast) or qwen2:7b (better Spanish)"
+    ),
+    name: str = typer.Option(NORTENO_MODEL, help="Name of the custom Ollama model"),
+    skip_voice: bool = typer.Option(False, "--skip-voice"),
+    test: bool = typer.Option(True, "--test/--no-test", help="Ask the new model for a sample line"),
+) -> None:
+    """Create the custom 'norteño de la sierra' Ollama model + download the Mexican Spanish voice."""
+    import shutil
+    import subprocess
+
+    from .personas import modelfile
+
+    if not shutil.which("ollama"):
+        typer.echo("ollama not found on PATH")
+        raise typer.Exit(1)
+    pdir = home() / "personas"
+    pdir.mkdir(parents=True, exist_ok=True)
+    mf = pdir / f"{name}.Modelfile"
+    mf.write_text(modelfile("norteno", base), encoding="utf-8")
+    typer.echo(f"Modelfile: {mf}")
+    if subprocess.run(["ollama", "pull", base]).returncode != 0:
+        raise typer.Exit(1)
+    if subprocess.run(["ollama", "create", name, "-f", str(mf)]).returncode != 0:
+        typer.echo("ollama create failed")
+        raise typer.Exit(1)
+    if not skip_voice:
+        vdir = home() / "models" / "piper"
+        vdir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [sys.executable, "-m", "piper.download_voices", "--download-dir", str(vdir), SPANISH_VOICE]
         )
+    if test:
+        from .llm import OllamaClient, OllamaError, clean_spoken
+
+        try:
+            cli = OllamaClient(model=name, timeout_s=120)
+            txt = cli.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": "Observación: la persona está sentada. Problema principal: "
+                        "encorvado / inclinado hacia adelante durante 15 segundos. ¿Qué le dices?",
+                    }
+                ]
+            )
+            typer.echo(f"\n{name} dice: {clean_spoken(txt)}")
+        except OllamaError as e:
+            typer.echo(f"test failed: {e}")
+    typer.echo(
+        f"\nListo. Run:  posture-coach run --norteno     (or set coach.persona: norteno and llm.model: {name})"
+    )
 
 
 @app.command()
@@ -111,13 +239,16 @@ def calibrate(
     seconds: float = typer.Option(8.0, help="How long to record the neutral posture"),
     source: str = typer.Option(None),
     no_robot: bool = typer.Option(False, "--no-robot"),
+    norteno: bool = typer.Option(False, "--norteno", help="Spanish norteño voice/persona for instructions"),
+    language: str = typer.Option(None, help="Language for spoken instructions (English, Spanish)"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Record your neutral posture (sit/stand tall) so angles are measured relative to YOU."""
     _setup_logging(verbose)
-    cfg = _cfg(config, sets, camera__source=source)
+    cfg = _cfg(config, sets, camera__source=source, coach__language=language)
     if no_robot:
         cfg["robot"]["enabled"] = False
+    _localize(cfg, norteno)
     from .pipeline import calibrate as do_calibrate
 
     cal = do_calibrate(cfg, seconds)

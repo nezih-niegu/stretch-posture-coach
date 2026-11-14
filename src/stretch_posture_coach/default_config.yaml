@@ -11,6 +11,7 @@ camera:
   fps: 30
   rotate: cw90             # Stretch head camera is mounted sideways. cw90 | ccw90 | 180 | none
   pitch_deg: 0.0           # camera pitch (down = negative) used for gravity when robot head tilt is unavailable
+  depth: true              # RealSense depth (aligned to color) -> distance to the person for follow mode
 
 pose:
   model: full              # lite | full | heavy  (full runs ~20-30 FPS on the NUC12 i5)
@@ -50,6 +51,7 @@ thresholds:
 coach:
   enabled: true
   language: English        # language the robot speaks (e.g. English, Spanish)
+  persona: default         # default | norteno  (norteno = Spanish from the Sierra of Sonora/Chihuahua)
   robot_name: Stretch
   user_name: ""            # optional, the coach will use it sometimes
   min_interval_s: 25       # minimum time between any two spoken messages
@@ -91,6 +93,27 @@ robot:
   tilt_sign: -1            # flip to +1 if the head tilts the wrong way
   hfov_deg: 42             # horizontal FOV of the (rotated) head camera image
   vfov_deg: 69
+
+# Follow mode: Stretch turns its body to face you and keeps a safe distance using the mobile base.
+# OFF by default; enable with `posture-coach follow` or `posture-coach run --follow`.
+# Clear the floor between you and the robot and behind it. Keep the runstop (button on the head) in reach.
+follow:
+  enabled: false
+  target_m: 2.5            # preferred distance
+  min_m: 2.0               # closer than this -> back off (never approaches closer than this)
+  max_m: 3.0               # farther than this -> approach
+  emergency_m: 1.2         # closer than this -> back off a full step immediately
+  forward_pan_rad: 0.0     # head pan at which the camera looks straight ahead of the base
+  align_tol_deg: 12        # turn the body when you are more than this off-center
+  max_rotate_step_deg: 20  # largest single turn
+  max_translate_step_m: 0.15  # largest single forward/back step
+  rotate_speed_rad_s: 0.3  # used to wait for a step to finish (robot_helper caps speeds too)
+  translate_speed_m_s: 0.08
+  settle_s: 0.6            # pause after each step
+  stable_frames: 6         # consecutive detections required before moving
+  max_backoff_total_m: 1.0 # max total backing up (no rear sensor!) until it moves forward again
+  max_travel_m: 3.0        # never wander farther than this from where it started
+  announce: true           # say something when backing off / when the back-up limit is reached
 
 display:
   window: auto             # auto | true | false  (auto = only if $DISPLAY is set)

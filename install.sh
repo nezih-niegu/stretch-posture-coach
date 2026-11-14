@@ -4,6 +4,7 @@
 #   ./install.sh                     # everything (system audio pkgs, uv, Python env, models, Ollama + qwen2:1.5b)
 #   ./install.sh --model qwen2:7b    # pick another Ollama model
 #   ./install.sh --spanish           # also download a Spanish voice and set Stretch to speak Spanish
+#   ./install.sh --norteno           # Spanish "norteño de la sierra" persona + custom Ollama model stretch-norteno
 #   ./install.sh --no-ollama         # skip Ollama (e.g. you run it on your laptop)
 #   ./install.sh --no-apt            # skip apt packages (no sudo)
 #
@@ -14,16 +15,24 @@ MODEL="qwen2:1.5b"
 DO_APT=1
 DO_OLLAMA=1
 SPANISH=0
+NORTENO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="$2"; shift 2 ;;
     --no-apt) DO_APT=0; shift ;;
     --no-ollama) DO_OLLAMA=0; shift ;;
     --spanish) SPANISH=1; shift ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --norteno) SPANISH=1; NORTENO=1; shift ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+if [[ $EUID -eq 0 ]]; then
+  echo "Do NOT run this with sudo. Run it as your normal user:  ./install.sh"
+  echo "(it asks for your password itself when it needs it)"
+  exit 1
+fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
@@ -37,7 +46,9 @@ if [[ $DO_APT -eq 1 ]]; then
   MISSING=()
   for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
   if [[ ${#MISSING[@]} -gt 0 ]]; then
-    sudo apt-get update -qq && sudo apt-get install -y -qq "${MISSING[@]}"
+    # ForceIPv4: networks with broken IPv6 make apt hang forever on "Connecting to ..."
+    sudo apt-get -o Acquire::ForceIPv4=true update && \
+      sudo apt-get -o Acquire::ForceIPv4=true install -y "${MISSING[@]}"
   else
     echo "all present"
   fi
@@ -84,6 +95,13 @@ sed -i "s|^  model: qwen2:.*|  model: $MODEL|" "$REPO/config.yaml"
 if [[ $SPANISH -eq 1 ]]; then
   sed -i 's|^  language: English.*|  language: Spanish|; s|^  piper_voice: .*|  piper_voice: es_MX-claude-high|; s|^  espeak_voice: .*|  espeak_voice: es-419|' "$REPO/config.yaml"
 fi
+if [[ $NORTENO -eq 1 ]]; then
+  if grep -q '^  persona:' "$REPO/config.yaml"; then
+    sed -i 's|^  persona: .*|  persona: norteno|' "$REPO/config.yaml"
+  else  # config.yaml from an older version
+    sed -i 's|^  language: \(.*\)|  language: \1\n  persona: norteno|' "$REPO/config.yaml"
+  fi
+fi
 
 # ---------------------------------------------------------------- 7. Ollama + model
 if [[ $DO_OLLAMA -eq 1 ]]; then
@@ -103,6 +121,12 @@ if [[ $DO_OLLAMA -eq 1 ]]; then
   fi
   ollama pull "$MODEL"
 fi
+if [[ $NORTENO -eq 1 ]]; then
+  say "Custom Ollama model: stretch-norteno (based on $MODEL)"
+  uv run posture-coach norteno-setup --base "$MODEL" --skip-voice \
+    && sed -i "s|^  model: qwen2.*|  model: stretch-norteno  # custom norteño model (base: $MODEL)|" "$REPO/config.yaml" \
+    || warn "could not create stretch-norteno; the norteño prompt will be used with $MODEL"
+fi
 
 # ---------------------------------------------------------------- 8. self-test
 say "Self-test (camera, pose model, Ollama, speaker, robot head)"
@@ -115,6 +139,8 @@ $(printf '\033[1;32m')Done!$(printf '\033[0m')  From any folder:
   posture-coach calibrate          # once: sit/stand tall for 8 s
   posture-coach run                # start coaching (Ctrl+C to stop -> HTML report)
   posture-coach run --mass 80      # your body mass for the load model
+  posture-coach follow             # turn/drive to face you at 2-3 m (clear the floor first!)
+  posture-coach run --follow --norteno   # coaching + follow, en norteño
 
 Live view from your laptop:  http://$(hostname).local:8080/   (or http://<robot-ip>:8080/)
 Settings: $REPO/config.yaml

@@ -16,6 +16,7 @@ from .assessment import Assessor
 from .biomech import Calibration, Subject, compute_metrics, gravity_from_pitch
 from .camera import open_source
 from .coach import Coach
+from .follow import Follower, person_distance
 from .llm import OllamaClient, OllamaError
 from .logger import SessionLogger
 from .pose import PoseEstimator
@@ -118,9 +119,24 @@ class Pipeline:
         self.min_vis = float(cfg["pose"].get("min_visibility", 0.5))
         self.source = source if source is not None else open_source(cfg["camera"])
         self.estimator = estimator if estimator is not None else make_estimator(cfg)
+        want_follow = bool(cfg.get("follow", {}).get("enabled", False))
         self.head = (
-            head if head is not None else make_head(cfg["robot"], float(cfg["camera"].get("pitch_deg", 0)))
+            head
+            if head is not None
+            else make_head(cfg["robot"], float(cfg["camera"].get("pitch_deg", 0)), base=want_follow)
         )
+        self.follower = Follower(cfg.get("follow", {}), cfg["robot"], self.head)
+        if want_follow and not self.follower.enabled:
+            log.warning(
+                "Follow mode requested but the mobile base is not available - only the head will track."
+            )
+        elif self.follower.enabled:
+            log.info(
+                "FOLLOW MODE ON: keeping %.1f-%.1f m. Keep the floor clear and the runstop in reach.",
+                self.follower._p("min_m", 2.0),
+                self.follower._p("max_m", 3.0),
+            )
+        self.follow_state = None
         self.speaker = speaker if speaker is not None else Speaker(cfg["speech"])
         self.llm = make_llm(cfg) if llm == "auto" else llm
         self.subject = subject_from_cfg(cfg)
@@ -169,9 +185,34 @@ class Pipeline:
             )
         a = self.assessor.update(raw, ts)
         self.coach.update(a, ts)
-        self.head.track(_torso_target(pose, self.min_vis) if a.present else None, ts)
+        target = _torso_target(pose, self.min_vis) if a.present else None
+        self.head.track(target, ts)
+        dist, src = person_distance(
+            pose if a.present else None,
+            getattr(self.source, "last_depth", None),
+            self.min_vis,
+            float(self.cfg["robot"].get("vfov_deg", 69)),
+        )
+        fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
+        self.follow_state = fs
+        if self.follower.enabled and self.cfg["follow"].get("announce", True):
+            if fs.action == "back_off":
+                self.coach.announce("follow_back", ts)
+            elif fs.action == "blocked" and "back-up" in fs.note:
+                self.coach.announce("follow_limit", ts)
+        if fs.action in ("rotate", "approach", "back_off") and self.logger:
+            self.logger.event(
+                {
+                    "kind": "follow",
+                    "action": fs.action,
+                    "note": fs.note,
+                    "distance_m": fs.distance,
+                    "bearing_deg": fs.bearing_deg,
+                    "wall_time": time.time(),
+                }
+            )
         if self.logger:
-            self.logger.log(a, self.head.tilt)
+            self.logger.log(a, self.head.tilt, fs)
         self.last_assessment = a
         return pose, a
 
@@ -212,6 +253,8 @@ class Pipeline:
                         "fps": self.fps,
                         "last_message": self.coach.last_message,
                         "tilt_deg": "-" if tilt is None else f"{math.degrees(tilt):.0f}",
+                        "follow": self.follow_state,
+                        "follow_enabled": self.follower.enabled,
                     }
                     vis = draw(frame, pose, a, self.cfg["thresholds"], status, self.min_vis)
                     if self.streamer:
@@ -230,8 +273,20 @@ class Pipeline:
         return self.logger.dir if self.logger else None
 
     def _summary(self, a) -> dict:
+        fs = self.follow_state
+        follow = (
+            None
+            if fs is None
+            else {
+                "distance_m": fs.distance,
+                "source": fs.source,
+                "action": fs.action,
+                "bearing_deg": fs.bearing_deg,
+                "enabled": self.follower.enabled,
+            }
+        )
         if not a.present:
-            return {"present": False, "fps": round(self.fps, 1)}
+            return {"present": False, "fps": round(self.fps, 1), "follow": follow}
         keys = [
             "posture",
             "neck_flexion",
@@ -257,17 +312,22 @@ class Pipeline:
             "static_s": round(a.static_for_s),
             "issues": [s.detail for s in a.active],
             "last_message": self.coach.last_message,
+            "follow": follow,
         }
 
     def _status_line(self, a) -> str:
+        fs = self.follow_state
+        dist = "" if fs is None or fs.distance is None else f" | {fs.distance:.2f} m ({fs.source})"
+        if self.follower.enabled and fs is not None:
+            dist += f" follow:{fs.action}"
         if not a.present:
-            return f"[{self.fps:4.1f} fps] no person in view"
+            return f"[{self.fps:4.1f} fps] no person in view{dist}"
         m = a.metrics
         issues = ",".join(s.rule.id for s in a.active) or "none"
         return (
             f"[{self.fps:4.1f} fps] {m.get('posture')}: neck {m.get('neck_flexion')} trunk {m.get('trunk_flexion')}"
             f" | RULA {a.rula and a.rula['score']} REBA {a.reba and a.reba['score']}"
-            f" | L5/S1 {m.get('l5s1_compression_n')} N | issues: {issues}"
+            f" | L5/S1 {m.get('l5s1_compression_n')} N | issues: {issues}{dist}"
         )
 
     def close(self):
@@ -296,7 +356,10 @@ def calibrate(
     speaker = speaker if speaker is not None else Speaker(cfg["speech"])
     min_vis = float(cfg["pose"].get("min_visibility", 0.5))
     subject = subject_from_cfg(cfg)
-    spanish = cfg["coach"].get("language", "English").lower().startswith("span")
+    spanish = (
+        cfg["coach"].get("language", "English").lower().startswith(("span", "espa"))
+        or cfg["coach"].get("persona") == "norteno"
+    )
     try:
         if head.available:
             wait_for_tilt(head)

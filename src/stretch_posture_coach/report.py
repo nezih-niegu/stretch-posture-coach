@@ -35,6 +35,7 @@ TRACKED = [
     ("shoulder_tilt_cm", "Shoulder tilt", "cm", "shoulder_tilt_cm"),
     ("l5s1_compression_n", "L5/S1 compression", "N", "l5s1_compression_n"),
     ("neck_load_kg", "Neck equivalent load", "kg", None),
+    ("distance_m", "Distance to robot", "m", None),
 ]
 
 
@@ -52,7 +53,14 @@ def load_session(session_dir: str | Path) -> tuple[dict[str, np.ndarray], list[d
     cols: dict[str, np.ndarray] = {}
     if rows:
         for k in rows[0]:
-            if k in ("posture", "rula_risk", "reba_risk", "active_issues"):
+            if k in (
+                "posture",
+                "rula_risk",
+                "reba_risk",
+                "active_issues",
+                "distance_source",
+                "follow_action",
+            ):
                 cols[k] = np.array([r[k] for r in rows], dtype=object)
             else:
                 cols[k] = np.array([_f(r[k]) for r in rows])

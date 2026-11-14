@@ -1,4 +1,5 @@
-"""Bridge to the Stretch head (pan/tilt) through ``robot_helper.py`` running on the system python."""
+"""Bridge to the Stretch head (pan/tilt) and, for follow mode, the mobile base, through ``robot_helper.py``
+running on the robot's system python."""
 
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ class NullHead:
     """Used when no robot is available. Reports a fixed camera pitch."""
 
     available = False
+    has_base = False
+    runstop = None
 
     def __init__(self, pitch_deg: float = 0.0):
         self._tilt = math.radians(pitch_deg)
@@ -43,6 +46,12 @@ class NullHead:
     def track(self, target_xy, now: float) -> None:
         pass
 
+    def base_rotate(self, rad: float, compensate_head: bool = True) -> None:
+        pass
+
+    def base_translate(self, meters: float) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -50,12 +59,12 @@ class NullHead:
 class StretchHead:
     available = True
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, base: bool = False):
         self.cfg = cfg
         helper = resources.files("stretch_posture_coach").joinpath("robot_helper.py")
         python = shutil.which(cfg.get("python", "/usr/bin/python3")) or cfg.get("python", "/usr/bin/python3")
         self._proc = subprocess.Popen(
-            [python, str(helper)],
+            [python, str(helper), *(["--base"] if base else [])],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -64,6 +73,8 @@ class StretchHead:
         )
         self._pan: float | None = None
         self._tilt: float | None = None
+        self.runstop: bool | None = None
+        self.has_base = False
         self._ready = threading.Event()
         self.error: str | None = None
         self._stderr: collections.deque[str] = collections.deque(maxlen=20)
@@ -100,9 +111,13 @@ class StretchHead:
                 self.error = msg["error"]
                 self._ready.set()
             elif msg.get("ready"):
+                self.has_base = bool(msg.get("base"))
                 self._ready.set()
+            elif "warning" in msg:
+                log.warning("robot: %s", msg["warning"])
             else:
                 self._pan, self._tilt = msg.get("pan"), msg.get("tilt")
+                self.runstop = msg.get("runstop")
 
     def _send(self, obj: dict):
         if self._proc.poll() is not None or self._proc.stdin is None:
@@ -142,6 +157,20 @@ class StretchHead:
             self._send({"cmd": "move_by", "pan": dpan, "tilt": dtilt})
             self._last_cmd = now
 
+    def base_rotate(self, rad: float, compensate_head: bool = True) -> None:
+        """Rotate the base (CCW positive). Optionally counter-pan the head so the camera keeps looking at the
+        same spot while the body turns underneath it."""
+        if not self.has_base or not rad:
+            return
+        self._send({"cmd": "base", "rotate": rad})
+        if compensate_head:
+            self._send({"cmd": "move_by", "pan": -rad, "tilt": 0.0})
+
+    def base_translate(self, meters: float) -> None:
+        if not self.has_base or not meters:
+            return
+        self._send({"cmd": "base", "translate": meters})
+
     def close(self) -> None:
         self._send({"cmd": "quit"})
         try:
@@ -150,7 +179,8 @@ class StretchHead:
             self._proc.kill()
 
 
-def make_head(robot_cfg: dict, camera_pitch_deg: float = 0.0):
+def make_head(robot_cfg: dict, camera_pitch_deg: float = 0.0, base: bool = False):
+    """Return a StretchHead (with mobile base access if ``base``) or a NullHead when no robot is available."""
     enabled = robot_cfg.get("enabled", "auto")
     if enabled is False or str(enabled).lower() == "false":
         return NullHead(camera_pitch_deg)
@@ -159,7 +189,7 @@ def make_head(robot_cfg: dict, camera_pitch_deg: float = 0.0):
         log.info("stretch_body not found for %s; running without robot head control", python)
         return NullHead(camera_pitch_deg)
     try:
-        return StretchHead(robot_cfg)
+        return StretchHead(robot_cfg, base=base)
     except Exception as e:
         if enabled is True or str(enabled).lower() == "true":
             raise

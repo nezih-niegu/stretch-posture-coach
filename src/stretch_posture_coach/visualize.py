@@ -75,6 +75,13 @@ def draw(
 
     put("STRETCH POSTURE COACH", (255, 210, 120), 0.55, 2, 26)
     put(f"FPS {status.get('fps', 0):.1f}   head tilt {status.get('tilt_deg', '-')}", GREY, 0.42)
+    fs = status.get("follow")
+    if fs is not None and fs.distance is not None:
+        in_band = 2.0 <= fs.distance <= 3.0
+        txt = f"Distance {fs.distance:.2f} m ({fs.source})"
+        if status.get("follow_enabled"):
+            txt += f"  [{fs.action}]"
+        put(txt, GREEN if in_band else YELLOW, 0.45, 1, 20)
     if not a or not a.present:
         put("No person detected", YELLOW, 0.55, 1, 26)
         put("Stand 2-3 m from the robot,", GREY, 0.45)

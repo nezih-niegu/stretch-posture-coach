@@ -41,7 +41,9 @@ cd ~/Projects && git clone <YOUR-REPO-URL> stretch-posture-coach && cd stretch-p
 6. installs **Ollama**, starts it, and pulls **qwen2:1.5b**
 7. runs `posture-coach check` (camera, model, LLM, speaker, head) and Stretch says hello
 
-Options: `./install.sh --model qwen2:7b`, `--spanish` (Spanish voice and coaching), `--no-ollama`, `--no-apt`.
+Options: `./install.sh --model qwen2:7b`, `--spanish` (Spanish voice and coaching), `--norteno` (Spanish
+"norteño de la sierra" persona + custom Ollama model), `--no-ollama`, `--no-apt`.
+**Never run it with `sudo`**: it installs into your user and asks for the password itself when needed.
 
 > **Before running**, free the hardware: if the ROS 2 driver or a RealSense node is running, it holds the
 > camera and the head motors. Stop it (Ctrl+C in that terminal) or run `stretch_free_robot_process.py`.
@@ -72,6 +74,60 @@ Useful flags:
 
 Other commands: `posture-coach check`, `posture-coach say "hello"`, `posture-coach report [sessions/<stamp>]`,
 `posture-coach download-models --voice es_MX-claude-high`, `posture-coach init-config`.
+
+## Follow mode: face me and keep 2-3 m
+
+```bash
+posture-coach follow                 # only orientation + distance (no posture coaching)
+posture-coach run --follow           # posture coaching + follow
+posture-coach follow --target 2.2    # preferred distance
+```
+
+Stretch keeps tracking you with its head. When you are more than 12° off-center, the **base turns** toward
+you (in steps of at most 20°) while the head counter-turns, so the camera never loses you. Distance comes from
+the D435i **depth image** (median over your torso):
+
+| You are... | Stretch... |
+|---|---|
+| 2.0-3.0 m away | stays put |
+| farther than 3.0 m | steps closer (≤ 15 cm per step), never closer than 2.0 m, only when facing you |
+| closer than 2.0 m | backs up (≤ 15 cm per step); says it's making room |
+| closer than 1.2 m | backs up a full step right away |
+| out of view / runstop pressed | freezes |
+
+Safety limits (all in `config.yaml → follow`): it moves only with small, bounded relative steps (never
+open-ended velocity commands, and the robot-side helper clamps them again), one step at a time. It needs 6
+stable detections first, backs up at most 1 m in total (**Stretch has no rear sensor**) until it drives
+forward again, and stays within 3 m of where it started.
+
+**Before the first run:** clear the floor around the robot, keep the **runstop** (the button on the head)
+within reach, and make sure no ROS driver is running. Check that `forward_pan_rad: 0.0` really is "head looking
+straight over the front of the base" on your robot; if the body turns the wrong way, that value or
+`robot.pan_sign` is off. Start with `posture-coach follow`, walk slowly, and watch the distance in the web
+viewer.
+
+## En español / norteño de la sierra
+
+```bash
+posture-coach norteno-setup                 # once: custom Ollama model "stretch-norteno" + Mexican voice
+posture-coach run --norteno                 # coaching in norteño serrano
+posture-coach run --norteno --follow        # ...and follow you around
+posture-coach run --language Spanish        # neutral Mexican Spanish instead
+```
+
+`norteno-setup` writes `personas/stretch-norteno.Modelfile` (base `qwen2:1.5b`, the persona's system prompt,
+examples and a slightly higher temperature) and runs `ollama create stretch-norteno`. The persona is a warm,
+joking compa from the Sierra of Sonora/Chihuahua ("¡Ah, caray, andas jorobado como vaquero viejo! Recárgate en
+la silla y estira esa espalda bien derechito"). It never uses profanity or narco/alcohol references. The
+offline fallback lines are norteño too, and so is the voice (Piper `es_MX-claude-high`).
+
+The 1.5B model's Spanish is just OK. For a much richer accent and better jokes use a 7B base. It takes ~4.4 GB
+and replies in ~5-10 s on the NUC, which is fine because coaching is asynchronous:
+`posture-coach norteno-setup --base qwen2:7b`. You can also run that on your laptop's Ollama and point the
+robot at it with `--host`.
+
+To make it permanent, set it in `config.yaml`: `coach.persona: norteno`, `coach.language: Spanish`,
+`llm.model: stretch-norteno`, `speech.piper_voice: es_MX-claude-high`.
 
 ### Placement
 
@@ -130,6 +186,9 @@ camera:  {rotate: cw90}
 | Head turns **away** from you | flip `robot.pan_sign` (or `tilt_sign`) to `+1`. |
 | `head.startup() failed` | the ROS driver is using the motors; free the robot (see above), or run with `--no-robot`. |
 | No sound over SSH | `posture-coach say "test"`. The app sets `XDG_RUNTIME_DIR` for you; also check the volume with `pactl list sinks short` / `alsamixer`, and that a desktop session is logged in. |
+| Follow: base turns the wrong way / away from you | check `follow.forward_pan_rad` and `robot.pan_sign`; press the runstop first |
+| Follow: "Follow mode requested but the mobile base is not available" | the ROS driver holds the robot (`stretch_free_robot_process.py`), or `stretch_body` failed to start; see the log |
+| apt/Ollama hang on "Connecting to ..." an IPv6 address | `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1` (until reboot), then for snap Ollama `sudo snap restart ollama` |
 | Messages are slow | Normal first time (model load). Use `qwen2:0.5b`, or run Ollama on your laptop: `--host http://<laptop-ip>:11434`. On the laptop, start it with `OLLAMA_HOST=0.0.0.0 ollama serve`. |
 | Angles look off | calibrate; prefer a side view; make sure your whole body is visible. |
 
@@ -143,13 +202,13 @@ config, and the load model is a static 3-D approximation (no dynamics, no muscle
 
 ```bash
 uv sync
-uv run pytest            # 37 tests: geometry, RULA/REBA tables, load model, end-to-end pipeline with fake camera/LLM
+uv run pytest            # 55 tests: geometry, RULA/REBA, load model, follow controller, personas, end-to-end pipeline
 uv run ruff check .
 ```
 
 Layout: `src/stretch_posture_coach/` contains `camera.py`, `pose.py`, `biomech.py`, `ergonomics.py`,
-`assessment.py`, `coach.py`, `llm.py`, `speech.py`, `robot.py` + `robot_helper.py`, `visualize.py`,
+`assessment.py`, `coach.py`, `personas.py`, `follow.py`, `llm.py`, `speech.py`, `robot.py` + `robot_helper.py`, `visualize.py`,
 `stream.py`, `logger.py`, `report.py`, `pipeline.py` and `cli.py`.
 
-`robot_helper.py` runs on the robot's **system** Python (`/usr/bin/python3`, which has Hello Robot's
+`robot_helper.py` (head only, or the whole robot with `--base` in follow mode) runs on the robot's **system** Python (`/usr/bin/python3`, which has Hello Robot's
 `stretch_body`) as a small subprocess, so the uv environment never conflicts with the robot's packages.
