@@ -250,10 +250,17 @@ def scene_section(session_dir: Path, cfg: dict) -> str:
             f'<p><img alt="Top-down map" src="data:image/png;base64,{base64.b64encode(mp.read_bytes()).decode()}">'
             "</p>"
         )
-    src = {
+    src_names = {
+        "registered-lidar": "lidar SLAM + head joints + floor plane (registered live)",
+        "registered-odometry": "wheel odometry + head joints + floor plane (no lidar)",
+        "kinematic+floor": "head joints + wheel odometry, corrected with the floor plane",
         "kinematic": "head joint states + wheel odometry (reference, not camera-only)",
-        "oneslam+kinematic": "OneSLAM camera-only trajectory (metric scale from depth)",
-    }.get(sc["source"], sc["source"])
+    }
+    src = sc["source"]
+    if src.startswith("oneslam"):
+        src = "OneSLAM camera-only trajectory (metric scale from depth)"
+    else:
+        src = src_names.get(src, src)
     rows = [
         ("Pose source", src),
         ("Keyframes (with depth)", f"{sc['frames']} ({sc['frames_with_depth']})"),
@@ -263,6 +270,15 @@ def scene_section(session_dir: Path, cfg: dict) -> str:
         ("Mapped extent", " × ".join(f"{v} m" for v in sc.get("extent_m", []))),
         ("Camera travel", f"{sc.get('camera_travel_m', 0)} m"),
     ]
+    fc = sc.get("floor_correction")
+    if fc and fc.get("floor_fits"):
+        rows.append(
+            (
+                "Floor-plane correction",
+                f"tilt {fc['tilt_offset_deg']:+.1f}°, roll {fc['roll_deg']:+.1f}°, height {fc['height_offset_m'] * 100:+.0f} cm "
+                f"({fc['floor_fits']} frames)",
+            )
+        )
     p = sc.get("person")
     if p:
         rows += [
@@ -315,14 +331,64 @@ def scene_section(session_dir: Path, cfg: dict) -> str:
             f"GPU machine (<code>scripts/run_oneslam.sh</code>), then <code>posture-coach scene import-oneslam</code>. "
             f"See docs/ONESLAM.md.</p>"
         )
+    caps_html, legend = _captions_html(session_dir)
     return (
-        f"<h2>Scene understanding</h2>{img}"
+        f"<h2>Scene understanding</h2>{img}{legend}"
         "<p class=muted>Top-down view, Stretch's start at the black dot looking along the arrow. Light = free floor, "
-        "blue = obstacles (darker = taller), dark = not seen, orange = where the person spent time. People are removed "
-        "from the static map. "
+        "blue = obstacles (darker = taller), gray lines = walls from the lidar, dark = not seen. The colored squares "
+        "are the posture heat map; numbered dots are the captions below. People are removed from the static map. "
         f'<a href="/sessions/{session_dir.name}/scene3d">Open the 3-D view</a> · '
         f'<a href="/sessions/{session_dir.name}/scene/scene.ply" download>download the point cloud (PLY)</a></p>'
-        f"<table>{table}</table>{os_html}"
+        f"<table>{table}</table>{caps_html}{os_html}"
+    )
+
+
+def _captions_html(session_dir: Path) -> tuple[str, str]:
+    """Numbered captions (alerts, coaching moments, measured improvements) + the heat-map legend."""
+    p = session_dir / "scene" / "overlay.json"
+    if not p.exists():
+        return "", ""
+    try:
+        ov = json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        return "", ""
+    legend = ""
+    heat = ov.get("heat") or {}
+    if heat.get("cells"):
+        from .insights import diverging_rgb, rgb_hex
+
+        ramp = "".join(
+            f'<i style="flex:1;background:{rgb_hex(diverging_rgb(v, "light"))}"></i>'
+            for v in [i / 4 - 1 for i in range(9)]
+        )
+        legend = (
+            '<div style="font-size:13px;color:#52514e;margin:-6px 0 10px"><b>Posture heat map</b> - mean REBA '
+            f"where the person was ({len(heat['cells'])} cells of {heat['cell']} m)"
+            f'<div style="display:flex;height:10px;width:260px;border-radius:2px;overflow:hidden;margin:4px 0 2px">{ramp}</div>'
+            '<div style="display:flex;justify-content:space-between;width:260px;font-size:12px">'
+            "<span>better (REBA 1)</span><span>REBA 5</span><span>worse (9+)</span></div></div>"
+        )
+    caps = [c for c in ov.get("captions", []) if c]
+    if not caps:
+        return "", legend
+    rows = []
+    for c in caps:
+        t = datetime.fromtimestamp(c["t"]).strftime("%H:%M:%S") if c.get("t") else "-"
+        ink = "#0b0b0b" if c.get("level") == "warning" else "#fff"
+        num = (
+            f'<span style="display:inline-block;min-width:20px;height:20px;border-radius:10px;background:{c["color"]};'
+            f'color:{ink};text-align:center;font-weight:700;font-size:12px;line-height:20px">{c["id"]}</span>'
+        )
+        where = "" if c.get("pos") else " <span class=muted>(position unknown)</span>"
+        rows.append(
+            f"<tr><td>{num}</td><td>{t}</td><td>{html.escape(c.get('icon', ''))} {html.escape(c['title'])}{where}</td>"
+            f"<td>{html.escape(c.get('text') or '')}</td></tr>"
+        )
+    return (
+        "<h3>What happened where</h3><table><tr><th>#</th><th>Time</th><th>Caption</th><th>Detail</th></tr>"
+        + "".join(rows)
+        + "</table>",
+        legend,
     )
 
 

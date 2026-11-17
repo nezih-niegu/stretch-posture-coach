@@ -26,6 +26,7 @@ from .pose import PoseEstimator
 from .robot import make_head, wait_for_tilt
 from .scene import SceneRecorder
 from .speech import Speaker
+from .world import LiveWorld
 
 log = logging.getLogger(__name__)
 _REPORT_LOCK = threading.Lock()  # matplotlib report building, one at a time
@@ -121,6 +122,7 @@ class Pipeline:
         log_session: bool | None = None,
         vr: bool | None = None,
         keep_servers: bool = False,
+        world=None,
     ):
         self.cfg = cfg
         self.keep_servers = keep_servers
@@ -128,10 +130,16 @@ class Pipeline:
         self.source = source if source is not None else open_source(cfg["camera"])
         self.estimator = estimator if estimator is not None else make_estimator(cfg)
         want_follow = bool(cfg.get("follow", {}).get("enabled", False))
+        vcfg = cfg.get("vr", {})
+        want_vr = vcfg.get("enabled", True) if vr is None else vr
+        tcfg = cfg.get("teleop", {})
+        want_teleop = bool(want_vr and tcfg.get("enabled", True))
         self.head = (
             head
             if head is not None
-            else make_head(cfg["robot"], float(cfg["camera"].get("pitch_deg", 0)), base=want_follow)
+            else make_head(
+                cfg["robot"], float(cfg["camera"].get("pitch_deg", 0)), base=want_follow or want_teleop
+            )
         )
         self.follower = Follower(cfg.get("follow", {}), cfg["robot"], self.head)
         if want_follow and not self.follower.enabled:
@@ -172,13 +180,20 @@ class Pipeline:
         )
         self.window = _want_window(cfg) if window is None else window
         sessions_dir = cfg["logging"].get("sessions_dir", "sessions")
+        # registered world model: lidar SLAM + head joints + floor plane -> live map, heat map, captions
+        self.world = world if world is not None else LiveWorld(cfg, self.head, self.follower)
+        self.world.new_session(self.logger.dir if self.logger else None)
         self.vr = None
-        vcfg = cfg.get("vr", {})
-        if vcfg.get("enabled", True) if vr is None else vr:
+        if want_vr:
             from .vr import VRServer
 
             try:
-                self.vr = VRServer(vcfg, sessions_dir, vcfg.get("certs_dir", "certs"), cfg["thresholds"])
+                self.vr = VRServer(
+                    {**vcfg, "teleop": {**tcfg, "enabled": want_teleop}},
+                    sessions_dir,
+                    vcfg.get("certs_dir", "certs"),
+                    cfg["thresholds"],
+                )
                 log.info(
                     "VR view (Meta Quest browser): %s://%s:%d/  (accept the certificate warning once)",
                     self.vr.scheme,
@@ -187,6 +202,21 @@ class Pipeline:
                 )
             except Exception as e:
                 log.warning("Could not start VR server: %s", e)
+        self.teleop = None
+        if self.vr is not None:
+            self.vr.attach_world(self.world)
+            if want_teleop:
+                from .teleop import TeleopController
+
+                self.teleop = TeleopController(tcfg, self.head, self.world, self.vr)
+                self.teleop.start()
+                if not getattr(self.head, "has_base", False):
+                    log.info("Expert teleop: no mobile base/arm available (head-only or no robot)")
+                if self.vr.require_pin:
+                    log.warning(
+                        "EXPERT TELEOP PIN: %s  (enter it on the VR page to drive the base and arm)",
+                        self.vr.pin,
+                    )
         self.vr_control = False
         self.streamer = None
         if cfg["display"].get("stream", True) if stream is None else stream:
@@ -217,6 +247,11 @@ class Pipeline:
     def _on_event(self, ev: dict):
         if self.logger:
             self.logger.event(ev)
+        try:  # caption it in the SLAM view, where the person is
+            la = self.last_assessment
+            self.world.event(ev, la.metrics if la is not None and la.present else None)
+        except Exception as e:
+            log.debug("caption: %s", e)
 
     def step(self, frame: np.ndarray, ts: float):
         who = getattr(self, "_end_session_request", None)
@@ -240,6 +275,17 @@ class Pipeline:
         intr = getattr(self.source, "intrinsics", None) or Intrinsics.from_fov(
             w_img, h_img, float(self.cfg.get("vr", {}).get("fallback_hfov_deg", 60))
         )
+        wl = self.world.update(
+            ts,
+            frame,
+            depth,
+            intr,
+            self.head.pan,
+            self.head.tilt,
+            pose if a.present else None,
+            self.min_vis,
+            a,
+        )
         self._update_fall(frame, pose, raw, depth, intr, ts)
         self.coach.update(a, ts)  # muted (see _update_fall) while someone is down or a fall is being handled
         target = _torso_target(pose, self.min_vis) if a.present else None
@@ -252,7 +298,7 @@ class Pipeline:
         self.vr_control = look is not None
         if self.vr_control:  # telepresence: the robot head looks where the VR viewer looks
             yaw, pitch = look
-            self.head.look(forward_pan + yaw - self.follower.theta, pitch, ts)
+            self.head.look(forward_pan + yaw - wl["base"][2], pitch, ts)  # gaze heading in the map frame
         else:
             self.head.track(target, ts)
         dist, src = person_distance(
@@ -261,14 +307,20 @@ class Pipeline:
             self.min_vis,
             float(self.cfg["robot"].get("vfov_deg", 69)),
         )
-        if self.vr_control or self.fall.active:  # never drive while someone is in VR or may have fallen
+        teleop = self.teleop is not None and self.teleop.active
+        if self.vr_control or self.fall.active or teleop:
+            # never drive on our own while someone is in VR, may have fallen, or an expert has the controls
             fs = self.follower.state
             fs.distance, fs.source, fs.action = dist, src, "paused"
-            fs.note = "fall check / alarm" if self.fall.active else "VR head control"
+            fs.note = (
+                "expert teleop"
+                if teleop
+                else ("fall check / alarm" if self.fall.active else "VR head control")
+            )
         else:
             fs = self.follower.update(a.present, dist, src, target[0] if target else None, ts)
         self.follow_state = fs
-        self._record_scene(ts, frame, depth, intr, pose, raw, a.present)
+        self._record_scene(ts, frame, depth, intr, pose, raw, a.present, wl)
         if self.follower.enabled:
             key = (fs.action, fs.note.split(" (")[0] if fs.action == "hold" else fs.note)
             if key != getattr(
@@ -287,6 +339,30 @@ class Pipeline:
             pan = self.head.pan
             h, w = frame.shape[:2]
             hud = {**self._summary(a), "vr_control": self.vr_control}
+            h = self.head
+            extra = {
+                "T": [round(float(v), 5) for v in wl["T"].reshape(-1)],
+                "registered": "lidar" if self.world.lidar_ok else "odometry",
+                "person": None if wl["person"] is None else [round(float(v), 3) for v in wl["person"]],
+                "robot": {
+                    "base": [round(float(v), 4) for v in wl["base"]],
+                    "pan": h.pan,
+                    "tilt": h.tilt,
+                    "joints": dict(getattr(h, "joints", {}) or {}),
+                    "has_base": bool(getattr(h, "has_base", False)),
+                    "has_arm": bool(getattr(h, "has_arm", False)),
+                    "homed": getattr(h, "homed", None),
+                    "runstop": getattr(h, "runstop", None),
+                },
+                "world": self.world.status(),
+                "teleop_state": None
+                if self.teleop is None
+                else {
+                    k: v
+                    for k, v in self.teleop.state.items()
+                    if k in ("active", "note", "v", "w", "clutch", "mode")
+                },
+            }
             self.vr.publish(
                 frame,
                 depth,
@@ -297,6 +373,7 @@ class Pipeline:
                 a.metrics,
                 hud,
                 self.min_vis,
+                extra,
             )
         if self.follower.enabled and self.cfg["follow"].get("announce", True):
             if fs.action == "back_off":
@@ -437,8 +514,13 @@ class Pipeline:
         import cv2
 
         self.alarm.stop("session ended")
+        if self.teleop is not None:
+            self.teleop.close()
         if self.scene_rec:
             self.scene_rec.close()
+        if self.logger:
+            self.world.save_occupancy(self.logger.dir)
+        self.world.close()
         for fn in (self.speaker.close, self.head.close, self.source.close, self.estimator.close):
             try:
                 fn()
@@ -472,6 +554,7 @@ class Pipeline:
             float(self.cfg["logging"].get("log_hz", 5)),
         )
         self.alarm.snapshot_dir = self.logger.dir
+        self.world.new_session(self.logger.dir, old.dir)
         self.scene_rec = self._new_scene_recorder()
         log.info("Session %s ended (%s); new session %s started", old.dir.name, who, self.logger.dir.name)
         self._set_last_report(
@@ -485,14 +568,15 @@ class Pipeline:
             return None
         return SceneRecorder(self.logger.dir, sc)
 
-    def _record_scene(self, ts, frame, depth, intr, pose, raw, present) -> None:
+    def _record_scene(self, ts, frame, depth, intr, pose, raw, present, wl=None) -> None:
         if self.scene_rec is None:
             return
         h = self.head
-        if getattr(h, "base_x", None) is not None:  # wheel odometry from stretch_body (follow / base mode)
-            base = (h.base_x, h.base_y or 0.0, h.base_theta or 0.0)
-        else:  # dead-reckoned follow steps (0, 0, 0 when the base never moves)
-            base = (self.follower.x, self.follower.y, self.follower.theta)
+        base = wl["base"] if wl is not None else self.world.base_pose()
+        extra = {"fall": self.fall.state}
+        if wl is not None:  # registered camera pose (lidar SLAM + joints + floor plane)
+            extra["T_map_cam"] = [round(float(v), 5) for v in wl["T"].reshape(-1)]
+            extra["registration"] = "lidar" if self.world.lidar_ok else "odometry"
         self.scene_rec.maybe_record(
             ts,
             frame,
@@ -504,7 +588,7 @@ class Pipeline:
             pose if present else None,
             (raw or {}).get("posture"),
             self.min_vis,
-            {"fall": self.fall.state},
+            extra,
         )
 
     def _build_report(self, session_dir: Path) -> None:
@@ -615,13 +699,23 @@ class Pipeline:
                 text = t.get("fall_ok", "")
                 self.speaker.say(text)
             log.info("fall %s: %s", "alarm cleared" if was_alarm else "check cleared", reason)
-        if self.logger:
-            self.logger.event(
+        if state != IMPACT:
+            self._on_event(
                 {
                     "kind": "fall",
                     "state": state,
                     "reason": reason,
                     "text": text,
+                    "source": "fall-detector",
+                    "wall_time": time.time(),
+                }
+            )
+        elif self.logger:
+            self.logger.event(
+                {
+                    "kind": "fall",
+                    "state": state,
+                    "reason": reason,
                     "source": "fall-detector",
                     "wall_time": time.time(),
                 }

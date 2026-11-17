@@ -21,6 +21,9 @@ SCENE_FILES = {
     "scene.ply": "application/octet-stream",
     "points.bin": "application/octet-stream",
     "scene.json": "application/json",
+    "overlay.json": "application/json",
+    "occupancy.png": "image/png",
+    "occupancy.json": "application/json",
 }
 
 Route = tuple[int, str, bytes]

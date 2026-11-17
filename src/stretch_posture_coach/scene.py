@@ -315,6 +315,41 @@ def kinematic_poses(frames: list[dict], kin: HeadKinematics) -> dict[int, np.nda
     return out
 
 
+def registered_poses(frames: list[dict]) -> dict[int, np.ndarray]:
+    """T_map_cam recorded live (lidar SLAM / odometry + head joints + floor plane), when present."""
+    out = {}
+    for f in frames:
+        T = f.get("T_map_cam")
+        if T is not None and len(T) == 16:
+            out[f["i"]] = np.array(T, float).reshape(4, 4)
+    return out
+
+
+def floor_aligned_poses(
+    session_dir: Path, frames: list[dict], kin: HeadKinematics, cfg: dict | None = None, max_frames: int = 150
+) -> tuple[dict[int, np.ndarray], dict]:
+    """Kinematic poses corrected with the floor plane (tilt offset, camera roll, camera height) measured from
+    the recorded depth - for sessions recorded before live registration existed."""
+    from .registration import FloorAligner
+
+    al = FloorAligner(kin, (cfg or {}).get("scene", {}))
+    use = [f for f in frames if f.get("has_depth")]
+    if len(use) > max_frames:
+        use = [use[int(k)] for k in np.linspace(0, len(use) - 1, max_frames)]
+    for f in use:
+        d = _depth(session_dir, f["i"])
+        if d is None:
+            continue
+        keep = ~_mask(session_dir, f["i"], d.shape)
+        pts, _ = backproject(d, _depth_intr(f, d.shape), 4, keep, 0.3, 4.5)
+        al.observe(pts, f.get("pan") or 0.0, f.get("tilt") or 0.0)
+    out = {}
+    for f in frames:
+        x, y, th = (f.get("base") or [0.0, 0.0, 0.0])[:3]
+        out[f["i"]] = map_T_base(x, y, th) @ al.base_T_cam(f.get("pan") or 0.0, f.get("tilt") or 0.0)
+    return out, al.status()
+
+
 def _depth(session_dir: Path, i: int) -> np.ndarray | None:
     p = session_dir / "scene" / "depth" / f"{i:08d}.png"
     if not p.exists():
@@ -439,6 +474,48 @@ def _reduce(keys_list, col_list, hits_list):
     return uniq, csum, hits
 
 
+def carve_seen_through(
+    smap: SceneMap,
+    session_dir: Path,
+    frames: list[dict],
+    poses: dict[int, np.ndarray],
+    max_frames: int = 200,
+    min_through: int = 2,
+    ratio: float = 0.3,
+) -> SceneMap:
+    """Remove voxels that later frames see *through* (people and things that moved): for each voxel, count the
+    frames where it is in view with valid depth, and those where the measured surface is clearly behind it."""
+    if not len(smap.centers):
+        return smap
+    use = [f for f in frames if f.get("has_depth") and f["i"] in poses]
+    if len(use) > max_frames:
+        use = [use[int(k)] for k in np.linspace(0, len(use) - 1, max_frames)]
+    seen = np.zeros(len(smap.centers), np.int32)
+    through = np.zeros(len(smap.centers), np.int32)
+    c = smap.centers
+    for f in use:
+        d = _depth(session_dir, f["i"])
+        if d is None:
+            continue
+        person = _mask(session_dir, f["i"], d.shape)
+        fx, fy, cx, cy = _depth_intr(f, d.shape)
+        T = poses[f["i"]]
+        p = (c - T[:3, 3]) @ T[:3, :3]  # optical frame
+        z = p[:, 2]
+        idx = np.nonzero((z > 0.3) & (z < 4.5))[0]
+        u = np.round(p[idx, 0] / z[idx] * fx + cx).astype(np.int64)
+        r = np.round(p[idx, 1] / z[idx] * fy + cy).astype(np.int64)
+        ok = (u >= 0) & (u < d.shape[1]) & (r >= 0) & (r < d.shape[0])
+        idx, u, r = idx[ok], u[ok], r[ok]
+        dd = d[r, u]
+        valid = (dd > 0.3) & ~person[r, u]
+        idx, dd = idx[valid], dd[valid]
+        seen[idx] += 1
+        through[idx[dd > z[idx] + 0.10 + 0.015 * z[idx] ** 2]] += 1
+    drop = (through >= min_through) & (through > ratio * seen)
+    return SceneMap(smap.voxel, smap.centers[~drop], smap.colors[~drop], smap.hits[~drop])
+
+
 def carve_people(smap: SceneMap, track: list[dict], radius: float = 0.35) -> SceneMap:
     """Remove voxels in a vertical column around every tracked person position (mask edges, frames where the
     detector missed them). Furniture within ``radius`` of where someone stood is removed too."""
@@ -542,12 +619,39 @@ def analyze(smap: SceneMap, track: list[dict], cam_xy: np.ndarray, cell: float =
     return {"stats": stats, "grid": grid, "floor": floor, "height": height, "occ": occ, "to_rc": to_rc}
 
 
+def _hex_bgr(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)
+
+
 def render_topdown(
-    an: dict, track: list[dict], cam_xy: np.ndarray, cam_fwd: np.ndarray, path: Path, px_per_cell: int = 4
+    an: dict,
+    track: list[dict],
+    cam_xy: np.ndarray,
+    cam_fwd: np.ndarray,
+    path: Path,
+    px_per_cell: int = 4,
+    heat: dict | None = None,
+    captions: list[dict] | None = None,
+    occupancy: tuple | None = None,
 ) -> None:
     W, H = an["grid"]["shape"]
     cell = an["grid"]["cell"]
     img = np.full((W, H, 3), 40, np.uint8)  # unknown: dark
+    if occupancy is not None:  # lidar walls where the camera never looked
+        try:
+            occ_img = cv2.imread(str(occupancy[0]), cv2.IMREAD_GRAYSCALE)
+            om = occupancy[1]
+            if occ_img is not None:
+                ys, xs = np.nonzero(occ_img < 64)
+                pts = np.stack(
+                    [om["origin"][0] + (xs + 0.5) * om["res"], om["origin"][1] + (ys + 0.5) * om["res"]], 1
+                )
+                if len(pts):
+                    r, c = an["to_rc"](pts)
+                    img[r, c] = (110, 112, 115)
+        except Exception as e:
+            log.debug("occupancy overlay: %s", e)
     img[an["floor"]] = (225, 224, 220)  # free floor: light
     hgt = an["height"]
     occ = an["occ"]
@@ -562,7 +666,22 @@ def render_topdown(
         r, c = to_rc(np.atleast_2d(p))
         return np.stack([c * px_per_cell + px_per_cell // 2, r * px_per_cell + px_per_cell // 2], axis=1)
 
-    if track:  # where the person was: heat + path
+    heat_cells = (heat or {}).get("cells") or []
+    if heat_cells:  # posture heat map: mean REBA where the person was (blue better ... red worse)
+        hc = float(heat["cell"])
+        over = img.copy()
+        for hcell in heat_cells:
+            a = pix([hcell["x"] - hc / 2, hcell["y"] - hc / 2])[0].astype(int)
+            b = pix([hcell["x"] + hc / 2, hcell["y"] + hc / 2])[0].astype(int)
+            cv2.rectangle(
+                over,
+                (int(min(a[0], b[0])) + 1, int(min(a[1], b[1])) + 1),
+                (int(max(a[0], b[0])) - 1, int(max(a[1], b[1])) - 1),
+                _hex_bgr(hcell["color"]),
+                -1,
+            )
+        img = cv2.addWeighted(over, 0.85, img, 0.15, 0)
+    if track and not heat_cells:  # where the person was: density + path
         P = np.array([[p["x"], p["y"]] for p in track])
         heat = np.zeros(img.shape[:2], np.float32)
         for x, y in pix(P):
@@ -587,6 +706,25 @@ def render_topdown(
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
             (30, 30, 30),
+            1,
+            cv2.LINE_AA,
+        )
+    for c in captions or []:  # numbered caption markers (status color + number; the report lists them)
+        if not c.get("pos"):
+            continue
+        q = pix(c["pos"][:2])[0].astype(int)
+        cv2.circle(img, (int(q[0]), int(q[1])), 11, _hex_bgr(c["color"]), -1, cv2.LINE_AA)
+        cv2.circle(img, (int(q[0]), int(q[1])), 11, (255, 255, 255), 1, cv2.LINE_AA)
+        txt = str(c["id"])
+        (tw, th_), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        ink = (11, 11, 11) if c.get("level") == "warning" else (255, 255, 255)
+        cv2.putText(
+            img,
+            txt,
+            (int(q[0]) - tw // 2, int(q[1]) + th_ // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            ink,
             1,
             cv2.LINE_AA,
         )
@@ -631,7 +769,12 @@ def write_points_bin(path: Path, smap: SceneMap, cam_xyz: np.ndarray, track: lis
 
 
 def build_scene(session_dir: str | Path, cfg: dict | None = None, source: str = "auto") -> dict | None:
-    """Build scene/map.png, scene/scene.json, scene/scene.ply, scene/points.bin. Returns the stats dict."""
+    """Build scene/map.png, scene.json, scene.ply, points.bin and overlay.json (captions + posture heat map).
+
+    Pose source (auto): OneSLAM if imported > live registration (lidar SLAM + joints + floor) recorded with the
+    keyframes > head kinematics + wheel odometry corrected with the floor plane."""
+    from .insights import load_track, session_captions, session_heat
+
     session_dir = Path(session_dir)
     cfg = cfg or {}
     frames = load_frames(session_dir)
@@ -639,15 +782,25 @@ def build_scene(session_dir: str | Path, cfg: dict | None = None, source: str = 
         return None
     scfg = cfg.get("scene", {})
     kin = HeadKinematics.from_cfg(cfg)
-    poses = kinematic_poses(frames, kin)
-    used = "kinematic"
+    floor = None
+    reg = registered_poses(frames) if source in ("auto", "registered") else {}
+    if reg:
+        kinp = kinematic_poses(frames, kin)
+        poses = {**kinp, **reg}
+        kinds = {f.get("registration") for f in frames if f.get("T_map_cam")}
+        used = "registered-lidar" if "lidar" in kinds else "registered-odometry"
+    elif source in ("auto", "kinematic", "floor"):
+        poses, floor = floor_aligned_poses(session_dir, frames, kin, cfg)
+        used = "kinematic+floor" if floor.get("floor_fits") else "kinematic"
+    else:
+        poses, used = kinematic_poses(frames, kin), "kinematic"
     os_path = session_dir / "scene" / "oneslam" / "poses_cam_map.txt"
     if source in ("auto", "oneslam") and os_path.exists():
         os_poses = read_tum(os_path)
         if os_poses:
-            # frames OneSLAM did not localize (non-keyframes) fall back to the kinematic pose
+            # frames OneSLAM did not localize (non-keyframes) fall back to the other poses
             poses = {**{k: v for k, v in poses.items() if source == "auto"}, **os_poses}
-            used = "oneslam" if source == "oneslam" else "oneslam+kinematic"
+            used = "oneslam" if source == "oneslam" else f"oneslam+{used}"
     smap = fuse(
         session_dir,
         frames,
@@ -659,6 +812,8 @@ def build_scene(session_dir: str | Path, cfg: dict | None = None, source: str = 
     )
     track = person_track(frames, poses)
     smap = carve_people(smap, track, float(scfg.get("person_radius_m", 0.35)))
+    if scfg.get("carve_seen_through", True):
+        smap = carve_seen_through(smap, session_dir, frames, poses)
     ks = sorted(poses)
     cam_xyz = np.array([poses[k][:3, 3] for k in ks]).reshape(-1, 3)
     cam_fwd = np.array(
@@ -669,10 +824,46 @@ def build_scene(session_dir: str | Path, cfg: dict | None = None, source: str = 
         "frames": len(frames),
         "frames_with_depth": sum(1 for f in frames if f.get("has_depth")),
     }
+    if floor:
+        out["floor_correction"] = floor
+    # captions + posture heat map from the registered person track (track.jsonl), else the keyframe track
+    rtrack = load_track(session_dir)
+    if not rtrack:
+        by_i = {f["i"]: f for f in frames}
+        rtrack = [{"x": p["x"], "y": p["y"], "z": p["z"], "wall": by_i[p["i"]].get("wall")} for p in track]
+    captions = session_captions(session_dir, rtrack)
+    heat = session_heat(rtrack, float(cfg.get("vr", {}).get("heat_cell_m", 0.25)), "dark")
+    heat_light = session_heat(rtrack, float(cfg.get("vr", {}).get("heat_cell_m", 0.25)), "light")
+    occ_meta = None
+    om_path = session_dir / "scene" / "occupancy.json"
+    if om_path.exists():
+        try:
+            occ_meta = json.loads(om_path.read_text(encoding="utf-8"))
+        except ValueError:
+            occ_meta = None
+    overlay = {
+        "pose_source": used,
+        "captions": captions,
+        "heat": heat,
+        "occupancy": occ_meta,
+        "ceiling_m": float(cfg.get("vr", {}).get("map_ceiling_m", 2.2)),
+    }
+    (session_dir / "scene" / "overlay.json").write_text(json.dumps(overlay, indent=1), encoding="utf-8")
+    out["captions"] = len(captions)
+    out["heat_cells"] = len(heat["cells"])
     if len(smap.centers):
         an = analyze(smap, track, cam_xyz[:, :2] if len(cam_xyz) else np.zeros((1, 2)))
         out.update(an["stats"])
-        render_topdown(an, track, cam_xyz[:, :2], cam_fwd, session_dir / "scene" / "map.png")
+        render_topdown(
+            an,
+            track,
+            cam_xyz[:, :2],
+            cam_fwd,
+            session_dir / "scene" / "map.png",
+            heat=heat_light,
+            captions=captions,
+            occupancy=(session_dir / "scene" / "occupancy.png", occ_meta) if occ_meta else None,
+        )
         write_ply(session_dir / "scene" / "scene.ply", smap)
         write_points_bin(session_dir / "scene" / "points.bin", smap, cam_xyz, track)
     else:

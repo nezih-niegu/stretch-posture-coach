@@ -19,6 +19,7 @@ dependencies = [
     "piper-tts>=1.2",
     "websockets>=13",
     "cryptography>=42",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]

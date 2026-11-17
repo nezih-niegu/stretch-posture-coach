@@ -391,6 +391,74 @@ def follow_test(
         head.close()
 
 
+@app.command("lidar-test")
+def lidar_test(
+    config: Path = ConfigOpt,
+    sets: list[str] = SetOpt,
+    seconds: float = typer.Option(6, help="How long to listen"),
+) -> None:
+    """Check the base lidar (RPLidar A1) and its mounting: stand ~1 m in FRONT of the robot while it runs."""
+    import math
+    import time
+
+    import numpy as np
+
+    _setup_logging(False)
+    cfg = _cfg(config, sets)
+    lc = cfg["lidar"]
+    from .lidar import RPLidar, to_base
+
+    typer.echo(f"Opening {lc['port']}...")
+    try:
+        lid = RPLidar(str(lc["port"]), int(lc.get("baud", 115200)))
+    except Exception as e:
+        typer.echo(
+            f"FAIL: {e}\n-> Is the lidar plugged in (ls -l /dev/hello-lrf)? Is ROS (stretch_driver) using it?"
+        )
+        raise typer.Exit(1) from None
+    lid.start()
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < seconds and lid.error is None:
+        time.sleep(0.2)
+    n, scan = lid.scans, lid.latest
+    lid.close()
+    if lid.error or scan is None:
+        typer.echo(f"FAIL: no scans ({lid.error or 'timeout'}). Health: {lid.health}")
+        raise typer.Exit(1)
+    pts = to_base(
+        scan,
+        float(lc.get("yaw_offset_deg", 180)),
+        bool(lc.get("clockwise", True)),
+        float(lc.get("x", 0)),
+        float(lc.get("y", 0)),
+        float(lc.get("min_range_m", 0.25)),
+    )
+    typer.echo(f"OK: {n / seconds:.1f} scans/s, {len(pts)} valid points per scan, health {lid.health}")
+    if len(pts):
+        d = np.hypot(pts[:, 0], pts[:, 1])
+        k = int(np.argmin(d))
+        bearing = math.degrees(math.atan2(pts[k, 1], pts[k, 0]))
+        typer.echo(
+            f"Nearest object: {d[k]:.2f} m at bearing {bearing:+.0f} deg (0 = straight ahead, + = robot's left)"
+        )
+        typer.echo(
+            "If you stood in front and it says ~180 deg: set lidar.yaw_offset_deg: 0.  If left and right are "
+            "swapped (step to the robot's left: bearing should be positive): set lidar.clockwise: false."
+        )
+        for name, (lo, hi) in {
+            "front": (-20, 20),
+            "left": (70, 110),
+            "back": (160, 200),
+            "right": (-110, -70),
+        }.items():
+            a = np.degrees(np.arctan2(pts[:, 1], pts[:, 0])) % 360
+            lo_, hi_ = lo % 360, hi % 360
+            sel = (a >= lo_) & (a <= hi_) if lo_ < hi_ else (a >= lo_) | (a <= hi_)
+            typer.echo(
+                f"  {name:5s}: nearest {d[sel].min():.2f} m" if sel.any() else f"  {name:5s}: no returns"
+            )
+
+
 @app.command("norteno-setup")
 def norteno_setup(
     base: str = typer.Option(
@@ -507,6 +575,14 @@ def check(
             )
     except Exception as e:
         report("camera", False, str(e))
+
+    lport = Path(str(cfg["lidar"].get("port", "/dev/hello-lrf")))
+    if cfg["lidar"].get("enabled", "auto") in (False, "false", "off"):
+        report("lidar", True, "disabled in config (maps use wheel odometry)")
+    elif lport.exists():
+        report("lidar", True, f"{lport} present (run `posture-coach lidar-test` to check the mounting)")
+    else:
+        report("lidar", True, f"{lport} not found: VR scan + scene map use wheel odometry only")
 
     mp_path = model_path(cfg["pose"]["models_dir"], cfg["pose"]["model"])
     if not mp_path.exists():

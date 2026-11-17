@@ -172,6 +172,55 @@ scene:
   pan_axis_x: 0.0          # head pan axis position in the base frame (m) - approximate
   pan_axis_y: 0.0
   camera_forward_m: 0.05   # camera optical centre ahead of the pan axis
+  floor_align: true        # measure head-tilt offset, camera roll and height from the floor plane (fixes
+                           # "stacked floors" / slanted ceilings in the map)
+  tilt_offset_deg: 0.0     # starting values (refined online when the floor is visible)
+  roll_offset_deg: 0.0
+  height_offset_m: 0.0
+
+# Base lidar (RPLidar A1 on Stretch 3): 2-D SLAM gives drift-free base poses -> registered VR scan + scene map,
+# and the collision guard for expert teleop. Check the mounting with `posture-coach lidar-test`.
+lidar:
+  enabled: auto            # auto (use it if the port exists) | true | false
+  port: /dev/hello-lrf
+  baud: 115200
+  yaw_offset_deg: 180      # laser frame yaw in base_link (Stretch: 180)
+  clockwise: true          # RPLidar angles grow clockwise seen from above
+  x: 0.0                   # laser position in base_link (m)
+  y: 0.0
+  min_range_m: 0.25        # ignore returns from the robot's own body
+  max_range_m: 10.0
+  map_res_m: 0.05
+  map_size_m: 40.0
+  min_score: 0.35          # scan-match quality below this -> trust wheel odometry for that scan
+  map_update_m: 0.10       # add a scan to the map after moving this far / turning this much
+  map_update_deg: 5
+
+# Expert teleoperation from the VR page (Meta Quest): arm by hand tracking, base by joystick, gripper A/B with
+# haptic feedback. Overrides follow mode while active. One expert at a time, unlocked with a PIN.
+teleop:
+  enabled: true
+  require_pin: true
+  pin: ""                  # empty = a new random 6-digit PIN each run (printed in the log)
+  max_speed_m_s: 0.25      # base, full joystick deflection
+  max_turn_rad_s: 0.6
+  command_timeout_s: 0.4   # no fresh command from the headset -> stop
+  rate_hz: 20
+  hand_scale: 1.0          # gripper moves this many metres per metre of hand motion
+  precision_scale: 0.3     # ...while the right trigger is held
+  arm_axis_sign: -1        # Stretch's arm extends along -y of the base; flip to +1 if extension is reversed
+  wrist_gains: [1.0, 1.0, 1.0]   # yaw, pitch, roll
+  gripper_open_pct: 50
+  gripper_close_pct: -100  # closes until it stalls on the object (stretch_body limits the force)
+  gripper_effort_free: 8   # gripper motor effort (%) with nothing in it ...
+  gripper_effort_full: 60  # ... and at a firm grasp -> full vibration
+  arm_effort_free: 25      # lift / arm effort (%) -> vibration on contact
+  arm_effort_full: 70
+  lidar_guard: true        # slow down / stop driving toward obstacles seen by the lidar
+  footprint_half_length_m: 0.20
+  footprint_half_width_m: 0.20
+  stop_distance_m: 0.30
+  slow_distance_m: 0.60
 
 # VR telepresence for the Meta Quest browser: https://<robot>:8443/  (accept the certificate warning once)
 vr:
@@ -183,20 +232,29 @@ vr:
   fps: 15                  # RGB-D frames per second sent to the headset (rendering runs at 72-120 Hz anyway)
   depth_decimation: 4      # 480x640 color -> 120x160 depth grid (3-D surface resolution)
   jpeg_quality: 70
-  max_range_m: 4.5        # depth beyond this is too noisy on the D435 -> dropped (backdrop/memory fill in)
+  max_range_m: 4.5         # depth beyond this is too noisy on the D435 -> dropped
   camera_height_m: 1.3     # robot head camera height above the floor (draws the floor grid)
   head_control: true       # in VR the robot head follows your head (toggle with A/X)
   gripper_camera: auto     # D405 on the gripper as a floating panel (auto | false)
   gripper_name: D405
   gripper_rotate: none
   aux_fps: 10
-  nav_camera: auto         # wide-angle head camera as a peripheral backdrop (auto | /dev/videoN | false)
+  nav_camera: auto         # wide-angle head camera as a panel (auto | /dev/videoN | false)
   nav_name: "vitade|navigation|wide|arducam"
   nav_rotate: ccw90        # the Stretch 3 wide-angle head camera is mounted sideways
   nav_hfov_deg: 120
   nav_vfov_deg: 90
   nav_width: 800
   nav_height: 600
+  map_hz: 2                # RGB-D frames fused into the registered room scan per second
+  map_voxel_m: 0.05
+  map_stride: 4            # use every 4th depth pixel (160x120 from 640x480)
+  map_min_hits: 2          # a voxel shows once seen twice (noise)
+  map_max_voxels: 400000
+  map_carve: true          # remove voxels the camera now sees through (moved furniture, people)
+  map_person_radius_m: 0.3 # and a column around the person
+  map_ceiling_m: 2.2       # the headset hides the map above this (toggle in VR)
+  heat_cell_m: 0.25        # posture heat map cell size
 
 logging:
   enabled: true

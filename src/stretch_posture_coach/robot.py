@@ -16,6 +16,9 @@ from importlib import resources
 log = logging.getLogger(__name__)
 
 
+_HEAD_KEYS = {"pan", "tilt", "runstop", "base_x", "base_y", "base_theta"}
+
+
 def stretch_body_available(python: str = "/usr/bin/python3") -> bool:
     exe = shutil.which(python) or python
     try:
@@ -30,7 +33,10 @@ class NullHead:
 
     available = False
     has_base = False
+    has_arm = False
+    homed = None
     runstop = None
+    joints: dict = {}
 
     def __init__(self, pitch_deg: float = 0.0):
         self._tilt = math.radians(pitch_deg)
@@ -53,6 +59,18 @@ class NullHead:
         pass
 
     def base_translate(self, meters: float) -> None:
+        pass
+
+    def drive(self, v: float, w: float) -> None:
+        pass
+
+    def set_joints(self, **targets) -> None:
+        pass
+
+    def gripper(self, pct: float) -> None:
+        pass
+
+    def hold(self) -> None:
         pass
 
     def close(self) -> None:
@@ -78,6 +96,10 @@ class StretchHead:
         self._tilt: float | None = None
         self.runstop: bool | None = None
         self.has_base = False
+        self.has_arm = False
+        self.homed: bool | None = None
+        self.joints: dict = {}  # lift, arm, wrist_*, gripper, *_effort (whole-robot mode)
+        self._send_lock = threading.Lock()
         self.base_x: float | None = None
         self.base_y: float | None = None
         self.base_theta: float | None = None
@@ -118,6 +140,8 @@ class StretchHead:
                 self._ready.set()
             elif msg.get("ready"):
                 self.has_base = bool(msg.get("base"))
+                self.has_arm = bool(msg.get("arm"))
+                self.homed = msg.get("homed")
                 self._ready.set()
             elif "warning" in msg:
                 log.warning("robot: %s", msg["warning"])
@@ -126,14 +150,16 @@ class StretchHead:
                 self.runstop = msg.get("runstop")
                 self.base_x, self.base_y = msg.get("base_x"), msg.get("base_y")
                 self.base_theta = msg.get("base_theta")
+                self.joints = {k: v for k, v in msg.items() if k not in _HEAD_KEYS}
 
     def _send(self, obj: dict):
         if self._proc.poll() is not None or self._proc.stdin is None:
             return
         try:
-            self._proc.stdin.write(json.dumps(obj) + "\n")
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError):
+            with self._send_lock:  # pipeline, follow and teleop threads all talk to the helper
+                self._proc.stdin.write(json.dumps(obj) + "\n")
+                self._proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
             pass
 
     @property
@@ -189,6 +215,25 @@ class StretchHead:
         if not self.has_base or not meters:
             return
         self._send({"cmd": "base", "translate": meters})
+
+    # ---------------------------------------------------------------- expert teleop (whole-robot mode)
+    def drive(self, v: float, w: float) -> None:
+        """Base velocity (m/s, rad/s). Must be repeated: the helper stops the base 0.3 s after the last one."""
+        if self.has_base:
+            self._send({"cmd": "drive", "v": float(v), "w": float(w)})
+
+    def set_joints(self, **targets) -> None:
+        """Absolute targets for lift / arm (m) and wrist_yaw / wrist_pitch / wrist_roll (rad)."""
+        if self.has_arm:
+            self._send({"cmd": "joints", **{k: float(v) for k, v in targets.items() if v is not None}})
+
+    def gripper(self, pct: float) -> None:
+        if self.has_base:
+            self._send({"cmd": "gripper", "pos": float(pct)})
+
+    def hold(self) -> None:
+        if self.has_base:
+            self._send({"cmd": "hold"})
 
     def close(self) -> None:
         self._send({"cmd": "quit"})

@@ -108,3 +108,18 @@ clones a **pinned commit** (`05c1543`) on the GPU machine.
 * A person who stays still for the whole session is indistinguishable from furniture only where the detector
   missed them. Everywhere they were detected, they are removed.
 * Furniture within `scene.person_radius_m` (35 cm) of where someone stood is removed together with them.
+
+## Update: live registration as the default reference
+
+Sessions now record a **registered camera pose with every keyframe**:
+* 2-D lidar SLAM gives the base pose,
+* the head joint states give the camera direction,
+* the floor plane gives tilt, roll and height.
+
+`scene build` uses these poses by default (`source: registered-lidar` in `scene.json`). They are a much
+stronger reference than wheel odometry for judging OneSLAM's camera-only trajectory.
+
+When you import OneSLAM poses, the report uses them (`oneslam+registered-lidar`). It falls back to the
+registered poses for frames OneSLAM didn't localize.
+
+Older sessions without registered poses are rebuilt with the floor-plane correction (`kinematic+floor`).

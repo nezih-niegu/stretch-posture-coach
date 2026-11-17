@@ -68,7 +68,7 @@ def test_tum_roundtrip(tmp_path):
 def test_scene_map_from_head_sweep(tmp_path):
     sess = record(tmp_path, SWEEP)
     out = build_scene(sess, {})
-    assert out["source"] == "kinematic" and out["frames"] == 20
+    assert out["source"] == "kinematic+floor" and out["frames"] == 20  # old sessions get the floor correction
     assert out["extent_m"][1] == pytest.approx(5.0, abs=0.15)  # room is 5 m wide
     assert 0.5 < out["obstacle_area_m2"] < 2.5 and out["free_floor_m2"] > 8
     p = out["person"]
@@ -125,7 +125,7 @@ def test_oneslam_import_recovers_metric_scale_and_base_poses(tmp_path):
         assert T[0, 3] == pytest.approx(frames[k]["base"][0], abs=0.05) and abs(T[1, 3]) < 0.05
     assert m["head_only_check"] is None  # this run never stood still with a moving head
     out = build_scene(sess, {})
-    assert out["source"] == "oneslam+kinematic" and out["oneslam"]["metric"]
+    assert out["source"] == "oneslam+kinematic+floor" and out["oneslam"]["metric"]
 
 
 def test_head_only_check_passes_and_fails(tmp_path):

@@ -184,16 +184,20 @@ spoken alert.
 
 ## Scene understanding (and OneSLAM)
 
-Each session also records **RGB-D keyframes** from the head camera (1 per second by default) with the head joint
-states and base odometry. The report gets a **Scene understanding** section:
+Each session also records **RGB-D keyframes** from the head camera (1 per second by default). Each keyframe
+stores its **registered camera pose**: lidar SLAM, the head joints and the floor-plane correction. The person's
+registered positions and REBA scores go to `track.jsonl`. The report gets a **Scene understanding** section:
 
-* a top-down map of the room: free floor, obstacles by height, Stretch's path, and an orange heat map of where the
-  person spent time
+* a top-down map of the room: free floor, obstacles by height, lidar walls, Stretch's path, the **posture heat
+  map**, and numbered **captions**
+* **"What happened where"**: fall alarms, coaching moments and measured improvements, with time and detail
 * the free space around the person, the distance they walked, the floor area they used, and their distance to
   Stretch
-* a 3-D viewer (`/sessions/<id>/scene3d`) and a PLY point-cloud download
+* a 3-D **SLAM view** (`/sessions/<id>/scene3d`) and a PLY point-cloud download. The SLAM view shows captions
+  pinned in the scene (click one to fly to it), the heat map, lidar walls and a ceiling-cut slider.
 
-People are removed from the static map.
+People are removed from the static map: masked, carved around their track, and carved wherever later frames see
+through them. Sessions recorded before this version are rebuilt with the floor-plane correction.
 
 For **camera-only localization** the same recording can be run through
 [OneSLAM](https://github.com/arcadelab/OneSLAM) on a machine with an NVIDIA GPU:
@@ -228,42 +232,96 @@ said and why**. To browse reports later without starting a session, run `posture
 
 ## VR telepresence (Meta Quest 3/3S browser)
 
-While a session runs (`posture-coach run`, `posture-coach follow`, ...), a second web service streams the robot's
-cameras for VR:
+While a session runs (`posture-coach run`, `posture-coach follow`, ...), a second web service streams a
+**registered 3-D scan** of the room for VR:
 
 1. Put the Quest on the same Wi-Fi as the robot and open the **Meta Quest Browser**.
 2. Go to **`https://<robot-ip>:8443/`**. The robot prints the exact URL at start-up.
 3. The first time you'll see "Your connection is not private". Tap **Advanced → Proceed**. The robot uses a
    self-signed certificate because WebXR only works over https.
-4. Tap **Enter VR**.
+4. Tap **Enter VR**. You start in the "arm view", standing next to Stretch's mast. The left trigger toggles
+   between the arm view and the robot's head view.
 
-How it is made immersive:
+### One registered scan (lidar SLAM + depth)
 
-* **Real 3-D, not flat video.** The head D435i streams color + aligned depth. The headset rebuilds a textured
-  3-D surface of the room on its GPU and renders it per eye, so you get **true stereo and parallax when you
-  move your head**, at the Quest's 72-120 Hz, no matter how fast the Wi-Fi is.
-* **Your head drives Stretch's head.** Look left/right/up/down and the robot head follows (A/X toggles it).
-  Each frame is placed with the head pose it was captured at, so the world stays still while the robot catches
-  up. Lag shows up as the image arriving a moment later, not as the world swimming (the main cause of VR
-  sickness).
-* **Scene memory.** Areas the robot has looked at stay around you as a dimmer layer, so turning your head
-  reveals the room instead of black (B/Y toggles it).
-* **All cameras.** The gripper **D405** appears as a floating screen, the head's **wide-angle navigation camera**
-  is a peripheral backdrop behind the 3-D scene, and your **posture skeleton** is drawn in 3-D, colored by risk
-  (green/yellow/red), with a HUD showing RULA/REBA, distance and Stretch's last message.
-* **Trigger** recenters the live view in front of you. The floor grid sits at the robot's camera height, so you
-  see the room from Stretch's eyes.
-* **Low latency by design.** The headset acknowledges each frame, and the robot never has more than 2 frames in
-  flight, so stale frames are dropped instead of queuing up as lag. The HUD shows the round-trip time.
-* **Safety.** While someone is in VR controlling the head, follow mode **pauses the base**. It never drives
-  while you're immersed.
+Everything you see sits in **one map frame**, so nothing swims, doubles or stacks:
+
+* **Where the base is:** 2-D **lidar SLAM** using the base RPLidar. Scans are matched against an occupancy grid,
+  starting from wheel odometry. In simulation it held 1–2 cm while the wheel odometry alone drifted 60 cm.
+* **Where the camera looks:** the head pan/tilt joints.
+* **Tilt, roll and height:** measured from the **floor plane** the D435i sees. This removes the head-tilt
+  encoder offset, camera roll and camera height error that caused the "stacked floors" and the slanted
+  ceiling in older maps.
+* **The room:** head RGB-D frames are fused into a persistent colored voxel scan that streams to the headset as
+  incremental updates. People are masked out. Voxels the camera later sees *through* are carved away, so people
+  and moved furniture leave no ghosts. The ceiling above 2.2 m is hidden by default (it was the gray "cloud").
+* **The person** is a live depth surface with a 3-D skeleton colored by risk. Both are placed with the same
+  registered camera pose.
+* **The floor** shows the lidar scan (orange dots) and the lidar occupancy grid (walls). A **robot avatar** moves
+  with the real joint states.
+* **Panels:** the gripper **D405** camera, the wide-angle camera and the HUD. The HUD shows RULA/REBA, distance,
+  the last message and the SLAM status.
+* **Low latency:** the headset acknowledges each message, and stale frames are skipped rather than queued.
+  Rendering runs at 72-120 Hz regardless of the Wi-Fi.
+
+Check the lidar mounting once with `posture-coach lidar-test`. Stand about 1 m in front of the robot: the
+nearest object should read about 0°. Without a lidar (or with `lidar.enabled: false`), poses fall back to wheel
+odometry. The floor correction still applies.
+
+### Captions and the posture heat map
+
+* **Captions** appear in the scene where things happened:
+  * fall checks and alarms (red),
+  * coaching moments (orange),
+  * **measured improvements** (green), such as "Improved: head forward, 32° → 9° after the tip".
+  The same captions are numbered in the report's SLAM view and in its top-down map, with a "What happened
+  where" table.
+* **Heat map:** 25 cm floor cells colored by the mean **REBA** score while the person was there. Blue means better
+  posture, gray means REBA 5 and red means worse. It shows *where* in the room posture breaks down, for example
+  at a low shelf or one particular chair.
+* **Toggle** both with **Y** in VR, or with the checkboxes on the page and in the report's 3-D view. The report's 3-D view
+  also has a ceiling-cut slider and a lidar-walls layer.
+
+### Expert teleoperation (overrides follow mode)
+
+An expert can take over the base and the arm from the headset. On the VR page (before entering VR), type the
+**PIN** that the robot prints at start-up (`EXPERT TELEOP PIN: ...`) and tap **Take control**. Only one
+expert can have control at a time. Five wrong PINs lock the PIN entry for 60 s. Set a fixed PIN with `teleop.pin`.
+
+| Control | Does |
+|---|---|
+| **Right GRIP (hold)** | clutch: the gripper follows your hand. Up/down = lift, along the arm = extend/retract, turn/tilt/roll = wrist yaw/pitch/roll. Release, move your hand, grip again to "ratchet". |
+| **Right trigger** | precision mode (hand motion × 0.3) |
+| **A / B** | **open / close the gripper**. The right controller **vibrates with the grip force** (gripper motor effort), with a click on first contact. Lift/arm contact also vibrates. |
+| **Right stick click** | wrist following on/off |
+| **Left stick** | drive: forward/back, left/right **turns** (Stretch is differential-drive and can't strafe) |
+| **Left stick click** | pause/resume control (follow mode resumes while paused) |
+| **X** | robot head follows your head |
+| **Bare hands** | put the controllers down: the **right hand** moves the arm while the **left hand pinches** (clutch), and the right thumb–index distance sets the gripper opening. No joystick or vibration without controllers. |
+
+While the expert has control, **follow mode is paused** (the HUD and the log say "expert teleop").
+
+Safety:
+* The base stops 0.4 s after the last headset message. The robot helper has its own 0.3 s watchdog.
+* Speed is capped at 0.25 m/s (0.3 hard cap) and 0.6 rad/s.
+* Driving forward or backward **slows and stops before obstacles in the lidar scan**. That includes the patient.
+* The runstop is respected, and the arm/lift only move if the robot is **homed** (`stretch_robot_home.py`).
+
+Settings are under `teleop:` in the config, including the gripper effort → vibration mapping and
+`arm_axis_sign` in case the arm extends the wrong way.
+
+Teleop needs the whole robot, so `posture-coach run` now opens stretch_body's `Robot` (base, lift, arm, wrist,
+gripper) instead of just the head. Don't run the Xbox teleop script at the same time. To keep the old head-only
+behavior, set `teleop.enabled: false`.
 
 When the session ends, the headset exits VR and opens the report.
 
-Tuning (`config.yaml → vr`): `fps` (15), `depth_decimation` (4 gives a 120×160 3-D grid), `jpeg_quality`,
-`gripper_camera` / `nav_camera` (`auto`, `false`, or `/dev/videoN`), `nav_hfov_deg`, `nav_rotate`,
-`gripper_rotate`, `camera_height_m`. To turn VR off, use `--no-vr`. Bandwidth is about 1.5 MB/s, so 5 GHz Wi-Fi
-is recommended.
+Tuning (`config.yaml → vr`):
+* `fps` (15) and `depth_decimation`;
+* `map_hz`, `map_voxel_m`, `map_ceiling_m` and `heat_cell_m`;
+* `gripper_camera` / `nav_camera` (`auto`, `false`, or `/dev/videoN`).
+
+Turn VR off with `--no-vr`. 5 GHz Wi-Fi is recommended.
 
 ### Placement
 
@@ -322,7 +380,7 @@ camera:  {rotate: cw90}
 | Head turns **away** from you | flip `robot.pan_sign` (or `tilt_sign`) to `+1`. |
 | `head.startup() failed` | the ROS driver is using the motors; free the robot (see above), or run with `--no-robot`. |
 | No sound over SSH | `posture-coach say "test"`. The app sets `XDG_RUNTIME_DIR` for you; also check the volume with `pactl list sinks short` / `alsamixer`, and that a desktop session is logged in. |
-| Follow: the base never moves | Follow is **off by default**: use `posture-coach follow` or `run --follow` (or `follow.enabled: true` in config.yaml). The log prints `follow: <decision> <reason>` on every change. It also pauses while someone controls the head from VR (press A/X in the headset), and when the runstop is pressed. Run `posture-coach follow-test` to check base access, do a tiny test move, and dry-run the camera. |
+| Follow: the base never moves | Follow is **off by default**: use `posture-coach follow` or `run --follow` (or `follow.enabled: true` in config.yaml). The log prints `follow: <decision> <reason>` on every change. It also pauses while someone controls the head from VR (press X in the headset), while an expert has teleop control, and when the runstop is pressed. Run `posture-coach follow-test` to check base access, do a tiny test move, and dry-run the camera. |
 | Follow: base turns the wrong way / away from you | check `follow.forward_pan_rad` and `robot.pan_sign`; press the runstop first |
 | Follow: "Follow mode requested but the mobile base is not available" | the ROS driver holds the robot (`stretch_free_robot_process.py`), or `stretch_body` failed to start; see the log |
 | apt/Ollama hang on "Connecting to ..." an IPv6 address | `sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1` (until reboot), then for snap Ollama `sudo snap restart ollama` |
@@ -330,8 +388,11 @@ camera:  {rotate: cw90}
 | No phone notification | set `alarm.ntfy_topic` and subscribe to the same topic in the ntfy app; the robot needs internet access to reach ntfy.sh |
 | Quest: "Enter VR" greyed out | open the page with **https://**…:8443 (not http) and accept the certificate warning |
 | Quest: VR view is black / "connected - waiting for video" | a session must be running (`posture-coach run`); check the robot log for "VR viewer connected" |
-| VR looks busy / ghost copies of people | fixed: people are kept out of the scene memory, depth is cleaned (median filter, edge "flying pixels", > 4.5 m dropped), and only 8 memories are kept, fading after 2 min. Press B/Y to turn memory off, or untick "wide-camera backdrop". |
-| VR: the wide-angle backdrop is sideways or mirrored | set `vr.nav_rotate` (cw90/ccw90/180) and `vr.nav_hfov_deg`; disable with `vr.nav_camera: false` |
+| VR scan looks doubled / floors stacked | check the SLAM status in the HUD (`lidar SLAM <score>`). With `no lidar: odometry`, run `posture-coach lidar-test`. If the lidar works but the walls are mirrored or rotated, set `lidar.yaw_offset_deg` / `lidar.clockwise`. The floor correction needs the floor in view at least once (tilt the head down). |
+| VR: wide-angle camera panel is sideways | set `vr.nav_rotate` (cw90/ccw90/180); disable with `vr.nav_camera: false` |
+| Teleop: "wrong PIN" / nothing moves | the PIN changes every run unless `teleop.pin` is set (see the log line `EXPERT TELEOP PIN`). The HUD shows notes such as `arm not homed` (run `stretch_robot_home.py`), `runstop pressed`, or `obstacle 0.25 m ahead: stopped` (lidar guard). |
+| Teleop: arm extends when I pull my hand back | set `teleop.arm_axis_sign: 1` |
+| Teleop: gripper vibrates all the time / never | adjust `teleop.gripper_effort_free` / `gripper_effort_full` (gripper motor effort in %); the grip-force bar in the HUD shows the current level |
 | Messages are slow | Normal first time (model load). Use `qwen2:0.5b`, or run Ollama on your laptop: `--host http://<laptop-ip>:11434`. On the laptop, start it with `OLLAMA_HOST=0.0.0.0 ollama serve`. |
 | Angles look off | calibrate; prefer a side view; make sure your whole body is visible. |
 
