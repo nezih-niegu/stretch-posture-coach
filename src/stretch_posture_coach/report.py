@@ -343,6 +343,44 @@ def scene_section(session_dir: Path, cfg: dict) -> str:
     )
 
 
+def scene_graph_section(session_dir: Path, cfg: dict) -> str:
+    """'Scene graph' block: objects found in the map, where the person spent time (with REBA), and where each
+    fall check happened."""
+    from .scenegraph import build_scene_graph, default_detector_path, pretty
+
+    if not (session_dir / "scene" / "points.bin").exists():
+        return ""
+    gc = cfg.get("scene_graph", {})
+    if not gc.get("enabled", True):
+        return ""
+    model = gc.get("detector_model") or default_detector_path()
+    try:
+        g = build_scene_graph(session_dir, gc, str(model) if Path(model).expanduser().exists() else None)
+    except Exception as e:
+        return f"<h2>Scene graph</h2><p class=muted>Scene graph failed: {html.escape(str(e))}</p>"
+    if not g:
+        return ""
+    objs = ", ".join(f"{n} {html.escape(pretty(k))}{'s' if n > 1 else ''}" for k, n in g["summary"].items()
+                     if k not in ("object", "tall_object"))
+    post = "".join(
+        f"<tr><td>{html.escape(k.replace('_', ' '))}</td><td>{v['samples']}</td><td>{v['reba_mean']}</td></tr>"
+        for k, v in list(g.get("posture_by_object", {}).items())[:10]
+    )
+    from collections import Counter
+
+    fall_at = Counter(f["at"] for f in g.get("fall_events", []) if f["kind"] in ("fall_check", "fall_alarm"))
+    falls = ", ".join(f"{html.escape(k.replace('_', ' '))} ({n})" for k, n in fall_at.most_common(6)) or "none"
+    occ = g.get("person_occluded_samples", 0)
+    return f"""<h2>Scene graph</h2>
+<p>Objects segmented from the registered map: {objs or "none"}. {len(g["edges"])} relations
+(in, next_to, at, near, sitting_on, occluded_by). The person was partly hidden by furniture in {occ} of
+{g.get("person_samples", 0)} keyframes.</p>
+<table><tr><th>Where the person was</th><th>Keyframes</th><th>Mean REBA</th></tr>{post}</table>
+<p>Fall checks and alarms by place: {falls}.</p>
+<p class=muted>Labels are geometric (height bands and footprint size) unless an object detector model is installed
+(<code>posture-coach download-models</code>). Full graph: scene/scene_graph.json.</p>"""
+
+
 def _captions_html(session_dir: Path) -> tuple[str, str]:
     """Numbered captions (alerts, coaching moments, measured improvements) + the heat-map legend."""
     p = session_dir / "scene" / "overlay.json"
@@ -399,6 +437,7 @@ def write_report(session_dir: str | Path) -> Path:
     (session_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     charts = make_charts(cols, cfg) if summary.get("samples") else []
     scene_html = scene_section(session_dir, cfg)
+    scene_html += scene_graph_section(session_dir, cfg)
 
     def table(d: dict) -> str:
         return (

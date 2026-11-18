@@ -89,11 +89,21 @@ def _observation_es(kind: str, a: Assessment, issues: list[IssueState], now: flo
 
 
 def build_prompt(
-    kind: str, a: Assessment, issues: list[IssueState], last_messages: list[str], cfg: dict, now: float
+    kind: str,
+    a: Assessment,
+    issues: list[IssueState],
+    last_messages: list[str],
+    cfg: dict,
+    now: float,
+    scene: str = "",
 ) -> list[dict]:
     c = cfg["coach"]
     p = personas.resolve(c)
     obs = (_observation_es if p.spanish else _observation_en)(kind, a, issues, now)
+    if scene:  # from the scene graph: where the person is and what they are using
+        obs += (f" Contexto de la escena (en inglés): {scene}" if p.spanish else f" Scene: {scene}") + (
+            " Si ayuda, adapta el consejo al mueble." if p.spanish else " If it helps, tailor the tip to that furniture."
+        )
     if last_messages:
         obs += (
             f' No repitas tu mensaje anterior: "{last_messages[-1]}".'
@@ -133,6 +143,7 @@ class Coach:
         self.absent_since: float | None = None
         self.history: deque[str] = deque(maxlen=4)
         self.last_message = ""
+        self.scene_text = ""  # set by the pipeline from the scene graph
         self._busy = threading.Event()
         self._praised: set[tuple[str, float]] = set()
         self._issues = list(issues)  # all IssueState objects owned by the Assessor
@@ -239,7 +250,7 @@ class Coach:
             if self.llm is not None:
                 t0 = time.monotonic()
                 try:
-                    raw = self.llm.chat(build_prompt(kind, a, issues, list(self.history), self.cfg, now))
+                    raw = self.llm.chat(build_prompt(kind, a, issues, list(self.history), self.cfg, now, self.scene_text))
                     text = clean_spoken(raw, allow_cjk=self.allow_cjk)
                     source = "llm"
                 except OllamaError as e:

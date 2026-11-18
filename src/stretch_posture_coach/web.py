@@ -22,6 +22,8 @@ SCENE_FILES = {
     "points.bin": "application/octet-stream",
     "scene.json": "application/json",
     "overlay.json": "application/json",
+    "scene_graph.json": "application/json",
+    "scene_graph_live.json": "application/json",
     "occupancy.png": "image/png",
     "occupancy.json": "application/json",
 }

@@ -795,6 +795,31 @@ def report_cmd(
     typer.echo(f"\nReport written to {out}")
 
 
+@app.command("scene-graph")
+def scene_graph_cmd(
+    session: Path = typer.Argument(None, help="Session folder (default: latest in ./sessions)"),
+    detector: bool = typer.Option(True, help="Use the object detector model if it is installed"),
+) -> None:
+    """Build scene/scene_graph.json for a recorded session (objects, relations, events, posture per object)."""
+    from .report import latest_session
+    from .scenegraph import build_scene_graph, default_detector_path
+
+    cfg = load_config()
+    session = session or latest_session(cfg["logging"]["sessions_dir"])
+    if session is None:
+        typer.echo("No sessions found.")
+        raise typer.Exit(1)
+    model = default_detector_path()
+    g = build_scene_graph(session, cfg.get("scene_graph", {}), str(model) if detector and model.exists() else None)
+    if g is None:
+        typer.echo("No scene map in this session (run `posture-coach report` first).")
+        raise typer.Exit(1)
+    typer.echo(g["description"])
+    typer.echo(json.dumps({"objects": g["summary"], "relations": len(g["edges"]),
+                           "posture_by_object": dict(list(g["posture_by_object"].items())[:8])}, indent=2))
+    typer.echo(f"\nWritten to {Path(session) / 'scene' / 'scene_graph.json'}")
+
+
 @app.command()
 def say(
     text: str = typer.Argument(..., help="Text to speak"), config: Path = ConfigOpt, sets: list[str] = SetOpt
@@ -816,12 +841,18 @@ def download_models_cmd(
     stt_model: str = typer.Option("base", "--stt-model", help="faster-whisper model for VR push-to-talk"),
     skip_stt: bool = typer.Option(False, "--skip-stt"),
 ) -> None:
-    """Download MediaPipe pose models (lite/full/heavy), Piper voices and the speech-to-text model."""
+    """Download MediaPipe pose models, the scene-graph object detector, Piper voices and the speech-to-text model."""
     from .pose import download_models
 
     models_dir = models_dir or home() / "models"
     for p in download_models(models_dir):
         typer.echo(f"pose model: {p}")
+    try:
+        from .scenegraph import download_detector
+
+        typer.echo(f"scene-graph object detector: {download_detector(models_dir / 'efficientdet_lite0.tflite')}")
+    except Exception as e:
+        typer.echo(f"warning: object detector download failed ({e}); scene graph uses geometric labels", err=True)
     if not skip_stt:
         try:
             from .voice import WhisperTranscriber

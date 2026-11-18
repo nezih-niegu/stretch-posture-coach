@@ -38,7 +38,9 @@
   <span class="muted">drag = orbit · right-drag = pan · wheel = zoom ·</span> <a href="./">back to report</a><br>
   <label><input type="checkbox" id="tHeat" checked> posture heat map</label>
   <label><input type="checkbox" id="tCap" checked> captions</label>
-  <label><input type="checkbox" id="tOcc" checked> lidar walls</label><br>
+  <label><input type="checkbox" id="tOcc" checked> lidar walls</label>
+  <label><input type="checkbox" id="tGraph" checked> scene graph</label><br>
+  <div id="graphinfo" class="muted"></div>
   <label>ceiling cut <input type="range" id="tCeil" min="1.0" max="3.2" step="0.1" value="2.2" style="width:110px;vertical-align:middle">
     <span id="ceilv">2.2 m</span></label>
   <div id="legend"></div>
@@ -132,6 +134,28 @@ if (ov.occupancy) {
 $('tOcc').onchange = (e) => { occGroup.visible = e.target.checked; };
 
 // --- posture heat map: mean REBA per floor cell (diverging blue <-> gray <-> red)
+// --- scene graph: furniture boxes with labels, coloured by class (scene/scene_graph.json)
+const graphGroup = new THREE.Group(); scene.add(graphGroup);
+try {
+  const r = await fetch('scene/scene_graph.json');
+  if (r.ok) {
+    const sg = await r.json();
+    const COL = { table: 0x3987e5, chair: 0xe66767, sofa: 0x9b6bd6, bed: 0x9b6bd6, cabinet: 0x19a979, low_object: 0x8a8a8a, screen: 0xfab219 };
+    for (const b of sg.boxes || []) {
+      if (b.label === 'object' || b.label === 'tall_object') continue;
+      const [l, w, h] = b.s, c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+      const at = (u, v, z) => new THREE.Vector3(b.c[0] + c * u - s * v, b.c[1] + s * u + c * v, z);
+      const P = [[l / 2, w / 2], [-l / 2, w / 2], [-l / 2, -w / 2], [l / 2, -w / 2]], seg = [];
+      for (let i = 0; i < 4; i++) { const [a0, b0] = P[i], [a1, b1] = P[(i + 1) % 4]; seg.push(at(a0, b0, 0.02), at(a1, b1, 0.02), at(a0, b0, h), at(a1, b1, h), at(a0, b0, 0.02), at(a0, b0, h)); }
+      graphGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg),
+        new THREE.LineBasicMaterial({ color: COL[b.label] || 0x8a8a8a, transparent: true, opacity: 0.7 })));
+    }
+    const parts = Object.entries(sg.summary || {}).filter(([k]) => !['object', 'tall_object', 'wall'].includes(k)).map(([k, n]) => `${n} ${k.replace('_', ' ')}`);
+    $('graphinfo').textContent = `scene graph: ${parts.join(', ')} · ${(sg.edges || []).length} relations`;
+  }
+} catch (e) { /* older session: no scene graph */ }
+$('tGraph').onchange = (e) => { graphGroup.visible = e.target.checked; };
+
 const heatGroup = new THREE.Group(); scene.add(heatGroup);
 const heat = ov.heat || { cells: [] };
 if (heat.cells && heat.cells.length) {

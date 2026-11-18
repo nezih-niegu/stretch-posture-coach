@@ -393,6 +393,7 @@ class Pipeline:
         self._update_fall(frame, pose, raw, depth, intr, ts)
         self._update_modes(ts)
         pol = self.fsm.policy
+        self.coach.scene_text = self.world.scene_text()
         if pol.coaching == "speak":
             self.coach.update(a, ts)  # (muted by _update_fall while someone is down)
         # "background" (survey, expert teleop): posture is still assessed, logged and mapped, just not spoken
@@ -639,6 +640,7 @@ class Pipeline:
             self.scene_rec.close()
         if self.logger:
             self.world.save_occupancy(self.logger.dir)
+            self.world.save_scene_graph(self.logger.dir)
         self.world.close()
         for fn in (self.speaker.close, self.head.close, self.source.close, self.estimator.close):
             try:
@@ -773,6 +775,8 @@ class Pipeline:
                 self.min_vis,
             )
         feats = features_from(ts, present, pose, raw, hip_h, self.min_vis)
+        if present:  # scene graph: what is under the person (sofa / bed is not the floor)
+            feats.support = (self.world.last.get("scene") or {}).get("support")
         change = self.fall.update(feats)
         # never give posture tips to someone who is down: while lying, during a fall check/alarm, and for a
         # quiet period after it clears (the "are you OK?" check and the alarm still speak)
@@ -790,6 +794,10 @@ class Pipeline:
 
     def _on_fall_change(self, state: str, reason: str, frame, present: bool, ts: float) -> None:
         t = self.coach.templates
+        if state in (CHECK, ALARM):  # name the place from the scene graph ("near table 3, hidden behind ...")
+            where = self.world.fall_where()
+            if where and where not in reason:
+                reason = f"{reason} ({where})"
         text = ""
         if state == IMPACT:
             log.info("fall? rapid descent: %s", reason)

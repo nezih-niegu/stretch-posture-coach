@@ -457,6 +457,7 @@ function drawHud() {
   ctx.fillText(`${S.connected ? 'live' : 'offline'} · ${S.fps.toFixed(0)} fps · ${S.latency.toFixed(0)} ms · ${lid} · ${(S.mapVoxels || 0).toLocaleString()} voxels${bar}`, 32, 94);
   let y = 146;
   const risk = (s) => (s == null ? '#ccc' : s >= 5 ? '#eb3c3c' : s >= 3 ? '#ffc800' : '#50c850');
+  if (S.scene) { ctx.font = '24px system-ui'; ctx.fillStyle = '#9fc3f0'; ctx.fillText(S.scene.slice(0, 78), 32, y - 12); y += 28; }
   if (h.present === false) { ctx.fillStyle = '#ffc800'; ctx.font = '32px system-ui'; ctx.fillText('No person in view', 32, y); y += 48; }
   else if (h.present) {
     ctx.font = '32px system-ui'; ctx.fillStyle = '#eee'; ctx.fillText(`Posture: ${h.posture || '?'}`, 32, y);
@@ -556,6 +557,7 @@ function onText(s) {
   if (s.type === 'teleop_fb') { S.tfb = s; return hapticFeedback(s.haptics); }
   if (s.type === 'status') { S.status = s; return; }
   if (s.type === 'barriers') return applyBarriers(s);
+  if (s.type === 'scene_graph') return applySceneGraph(s);
   if (s.type === 'voice') {
     S.voice = { ...(S.voice || {}), ...s, t: performance.now() };
     if (s.error) toast(s.error);
@@ -923,11 +925,58 @@ function applyBarriers(msg) {
 }
 const footCircles = new THREE.Group(); avatar.add(footCircles);
 
+// ------------------------------------------------------------------ scene graph (labelled furniture boxes)
+const graphGroup = new THREE.Group(); stage.add(graphGroup);
+const GRAPH_COLORS = { table: 0x3987e5, chair: 0xe66767, sofa: 0x9b6bd6, bed: 0x9b6bd6, bench: 0xe66767,
+  cabinet: 0x19a979, screen: 0xfab219, laptop: 0xfab219, low_object: 0x8a8a8a };
+const graphLabels = new Map();
+function graphLabel(text, color) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
+  const x = cv.getContext('2d');
+  x.fillStyle = 'rgba(20,20,22,0.78)'; x.beginPath(); x.roundRect(0, 8, 256, 48, 12); x.fill();
+  x.fillStyle = '#' + color.toString(16).padStart(6, '0'); x.fillRect(12, 24, 16, 16);
+  x.fillStyle = '#eee'; x.font = '28px system-ui'; x.fillText(text, 38, 42);
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sp.scale.set(0.36, 0.09, 1); sp.renderOrder = 25; return sp;
+}
+function applySceneGraph(g) {
+  S.scene = g.person || ''; S.sceneSupport = g.support; S.sceneAt = g.at;
+  if (g.version === graphGroup.userData.version) return highlightGraph();
+  graphGroup.userData.version = g.version;
+  for (const c of [...graphGroup.children]) { graphGroup.remove(c); c.geometry?.dispose(); c.material?.map?.dispose(); c.material?.dispose(); }
+  graphLabels.clear();
+  for (const b of g.boxes || []) {
+    if (b.label === 'object' || b.label === 'tall_object') continue;
+    const col = GRAPH_COLORS[b.label] || 0x8a8a8a;
+    const [l, w, h] = b.s, c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+    const corner = (u, v, z) => new THREE.Vector3(b.c[0] + c * u - s * v, b.c[1] + s * u + c * v, z);
+    const P = [[l, w], [-l, w], [-l, -w], [l, -w]].map(([u, v]) => [u / 2, v / 2]);
+    const seg = [];
+    for (let i = 0; i < 4; i++) {
+      const [u0, v0] = P[i], [u1, v1] = P[(i + 1) % 4];
+      seg.push(corner(u0, v0, 0.02), corner(u1, v1, 0.02), corner(u0, v0, h), corner(u1, v1, h), corner(u0, v0, 0.02), corner(u0, v0, h));
+    }
+    const box = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg),
+      new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.55 }));
+    box.userData.id = b.id; graphGroup.add(box);
+    const sp = graphLabel(b.id.replace('_', ' '), col); sp.position.set(b.c[0], b.c[1], h + 0.12);
+    graphGroup.add(sp); graphLabels.set(b.id, { box, sp });
+  }
+  highlightGraph();
+}
+function highlightGraph() {   // the object the person sits on / works at glows
+  for (const [id, o] of graphLabels) {
+    const hot = id === S.sceneSupport || id === S.sceneAt;
+    o.box.material.opacity = hot ? 1.0 : 0.45; o.box.material.linewidth = hot ? 2 : 1;
+  }
+}
+
 // ------------------------------------------------------------------ toasts (2-D page + HUD)
 function toast(text) { S.toast = { text, t: performance.now() }; msg(text); }
 
 // ------------------------------------------------------------------ overlays / toggles
-function setOverlay(on) { S.overlay = on; heatGroup.visible = captionGroup.visible = barrierGroup.visible = on; $('overlay').checked = on; }
+function setOverlay(on) { S.overlay = on; heatGroup.visible = captionGroup.visible = barrierGroup.visible = graphGroup.visible = on; $('overlay').checked = on; }
 $('overlay').onchange = (e) => setOverlay(e.target.checked);
 $('ceil').onchange = (e) => { mapMat.uniforms.ceilingOn.value = e.target.checked ? 1 : 0; };
 $('view').onclick = nextView;

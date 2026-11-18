@@ -252,6 +252,24 @@ class LiveWorld:
         from .cbf import CBFSafety
 
         self.cbf = CBFSafety(cfg.get("safety", {}))
+        from .scenegraph import SceneGraph, SemanticDetector
+
+        gc = cfg.get("scene_graph", {})
+        self.graph_enabled = bool(gc.get("enabled", True))
+        self.graph = SceneGraph(gc)
+        self.graph_period = float(gc.get("rebuild_s", 5.0))
+        self._last_graph = -1e9
+        self._map_changed = False
+        self.detector = None
+        if self.graph_enabled and gc.get("detector", "auto") not in (False, "false", "off"):
+            from .scenegraph import default_detector_path
+
+            self.detector = SemanticDetector(gc.get("detector_model") or default_detector_path(),
+                                             float(gc.get("detector_score", 0.4)))
+            if not self.detector.ok:
+                self.detector = None
+        self.detector_stride = max(1, int(gc.get("detector_every_keyframes", 3)))
+        self._kf = 0
         self.captions: list[dict] = []
         self.captions_version = 0
         self._caption_id = 0
@@ -265,6 +283,8 @@ class LiveWorld:
         self._running = True
         self._thread = threading.Thread(target=self._map_loop, daemon=True, name="live-map")
         self._thread.start()
+        if self.graph_enabled:
+            threading.Thread(target=self._graph_loop, daemon=True, name="scene-graph").start()
 
     # ---------------------------------------------------------------- poses
     def odom(self):
@@ -302,6 +322,18 @@ class LiveWorld:
         reba = None
         if assessment is not None and assessment.present and assessment.reba:
             reba = assessment.reba.get("score")
+        if self.graph_enabled and ts - getattr(self, "_last_graph_person", -1e9) >= self.track_period:
+            self._last_graph_person = ts
+            m = assessment.metrics if assessment is not None and assessment.present else {}
+            incl = m.get("trunk_inclination") if m else None
+            self.last["scene"] = self.graph.update_person(
+                person, None, m.get("posture") if m else None, cam_xyz=T[:3, 3],
+                lying=incl is not None and incl >= 55, metrics=m,
+            )
+            self.graph.update_robot(base, T[:3, 3])
+        elif "scene" in getattr(self, "_prev_last", {}):
+            self.last["scene"] = self._prev_last["scene"]
+        self._prev_last = self.last
         if person is not None and ts - self._last_track >= self.track_period:
             self._last_track = ts
             if reba is not None:
@@ -324,8 +356,32 @@ class LiveWorld:
                 continue
             try:
                 self._integrate(*item)
+                self._map_changed = True
             except Exception as e:  # never kill the map thread
                 log.debug("live map: %s", e)
+
+    def _graph_loop(self):
+        """Own thread, so re-segmenting never delays keyframe integration."""
+        import time as _time
+
+        while self._running:
+            _time.sleep(min(1.0, self.graph_period))
+            try:
+                self._maybe_rebuild_graph()
+            except Exception as e:
+                log.debug("scene graph: %s", e)
+
+    def _maybe_rebuild_graph(self, force: bool = False) -> None:
+        """Re-segment the object layer from the live map (scene-graph thread, every `rebuild_s`)."""
+        import time as _time
+
+        now = _time.monotonic()
+        if not self.graph_enabled or not (force or (self._map_changed and now - self._last_graph >= self.graph_period)):
+            return
+        self._last_graph, self._map_changed = now, False
+        centers, _ = self.map.snapshot()
+        if len(centers) > 200:
+            self.graph.rebuild_static(centers)
 
     def _integrate(self, frame, depth, intr, base, mask, pan, tilt, person):
         h, w = depth.shape[:2]
@@ -352,6 +408,15 @@ class LiveWorld:
         self.map.integrate(pw[ok], cols[ok], T, dcarve, intr4, self.max_range)
         if person is not None and self.person_radius > 0:
             self.map.remove_column(person[0], person[1], self.person_radius)
+        self._kf += 1
+        if self.detector is not None and self._kf % self.detector_stride == 0:
+            from .scenegraph import backproject_box
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            for name, score, box in self.detector.detect(rgb):
+                xyz = backproject_box(box, depth, [intr.fx, intr.fy, intr.cx, intr.cy, intr.w, intr.h], T, frame.shape)
+                if xyz is not None:
+                    self.graph.add_detection(name, xyz, score)
 
     def reset_registration(self) -> None:
         """Start a fresh map frame: new lidar SLAM map (map = base frame now), empty voxel map, and the floor
@@ -364,6 +429,9 @@ class LiveWorld:
         with self.aligner.lock:
             self.aligner.n = 0
         self.map.clear()
+        from .scenegraph import SceneGraph
+
+        self.graph = SceneGraph(self.cfg.get("scene_graph", {}))  # objects are re-segmented from the new map
         try:
             while True:
                 self._q.get_nowait()
@@ -389,6 +457,14 @@ class LiveWorld:
         )
         if c is None:
             return None
+        if self.graph_enabled and c.get("pos") is not None:
+            gev = self.graph.add_event(c.get("kind", kind or "event"), c["pos"], c.get("t", 0.0), c.get("title", ""))
+            if gev is not None and gev.attrs.get("at") not in (None, "floor"):
+                from .scenegraph import pretty
+
+                lab, num = gev.attrs["at"].rsplit("_", 1)
+                c["at"] = gev.attrs["at"]
+                c["text"] = (c.get("text") or "") + f" · near {pretty(lab).replace('_', ' ')} {num}"
         self._caption_id += 1
         c["id"] = self._caption_id
         if kind == "fall" and ev.get("state") == "ok":  # replace the open fall caption
@@ -409,6 +485,9 @@ class LiveWorld:
     def new_session(self, session_dir: Path | None, old_dir: Path | None = None) -> None:
         if old_dir is not None:
             self.save_occupancy(old_dir)
+            self.save_scene_graph(old_dir)
+        with self.graph.lock:
+            self.graph.events = []
         if self._track_f:
             self._track_f.close()
             self._track_f = None
@@ -462,8 +541,51 @@ class LiveWorld:
             return []
         return self.cbf.barrier_lines(self.loc.latest_points, self.loc.pose(self.odom()))
 
+    def fall_where(self) -> str:
+        """Where a fall check happens, from the scene graph: the furniture under / next to the person and what
+        hides them from the camera. When they are out of view, the hips are assumed near the floor (0.4 m)."""
+        if not self.graph_enabled:
+            return ""
+        pos = self.last.get("person")
+        if pos is None:
+            pos = getattr(self, "_last_person", None)
+        if pos is None:
+            return ""
+        cam = self.last["T"][:3, 3]
+        ctx = self.graph.context(np.array(pos), 0.4, cam, lying=True)
+        bits = []
+        if ctx.get("support_id"):
+            bits.append(f"on {ctx['support_id'].replace('_', ' ')}")
+        elif ctx.get("near"):
+            bits.append(f"near {ctx['near'][0]['id'].replace('_', ' ')}")
+        if ctx.get("occluder_id"):
+            bits.append(f"hidden behind {ctx['occluder_id'].replace('_', ' ')}")
+        return ", ".join(bits)
+
+    def scene_text(self) -> str:
+        return self.graph.describe() if self.graph_enabled else ""
+
+    def scene_graph_msg(self) -> dict:
+        ctx = self.last.get("scene") or {}
+        return {"type": "scene_graph", "version": self.graph.version, "boxes": self.graph.boxes(),
+                "person": ctx.get("text", ""), "support": ctx.get("support_id"), "at": ctx.get("at"),
+                "occluder": ctx.get("occluder_id"), "summary": self.graph.summary()}
+
+    def save_scene_graph(self, session_dir: Path) -> None:
+        if not self.graph_enabled:
+            return
+        try:
+            self._maybe_rebuild_graph(force=True)
+            d = Path(session_dir) / "scene"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "scene_graph_live.json").write_text(json.dumps(self.graph.to_json(), indent=1), encoding="utf-8")
+        except Exception as e:
+            log.debug("save scene graph: %s", e)
+
     def status(self) -> dict:
-        return {"lidar": self.loc.status(), "floor": self.aligner.status(), "map_voxels": len(self.map)}
+        return {"lidar": self.loc.status(), "floor": self.aligner.status(), "map_voxels": len(self.map),
+                "scene_graph": self.graph.summary() if self.graph_enabled else None,
+                "scene": (self.last.get("scene") or {}).get("text")}
 
     def close(self):
         self._running = False

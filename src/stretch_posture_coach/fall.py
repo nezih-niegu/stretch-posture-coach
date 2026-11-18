@@ -36,6 +36,7 @@ class FallFeatures:
     hip_y: float | None = None  # normalized image y of the hip midpoint (down = larger)
     torso_len: float | None = None  # normalized image length shoulder-mid -> hip-mid
     hand_raised: bool = False
+    support: str | None = None  # scene graph: what is under the hips ("floor", "sofa", "bed", "chair", ...)
 
 
 def hip_height_from_depth(
@@ -163,7 +164,11 @@ class FallDetector:
             self._upright_since = (self._upright_since or t) if self._upright(f) else None
             self._hand_since = (self._hand_since or t) if f.hand_raised else None
             on_floor = (
-                self._lying(f) and f.hip_height is not None and f.hip_height < self._p("floor_height_m", 0.45)
+                self._lying(f)
+                and f.hip_height is not None
+                and f.hip_height < self._p("floor_height_m", 0.45)
+                # lying on a sofa or bed is resting, not lying on the floor (scene graph)
+                and f.support in (None, "floor", "low_object")
             )
             self._floor_since = (self._floor_since or t) if on_floor else None
         else:

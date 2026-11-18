@@ -154,8 +154,12 @@ def test_vr_streams_registered_world(tmp_path):
                     got[j["type"]] = j
                 else:
                     t, meta, rest = unpack(m)
-                    got.setdefault(t, (meta, rest))
                     await ws.send(json.dumps({"type": "ack", "t": t}))
+                    if t == T_MAP:
+                        got.setdefault("first_map_full", bool(meta.get("full")))
+                        if not meta.get("n"):
+                            continue  # the map as it is at connect time can still be empty
+                    got.setdefault(t, (meta, rest))
 
     try:
         asyncio.run(scenario())
@@ -164,7 +168,7 @@ def test_vr_streams_registered_world(tmp_path):
         lid.close()
         world.close()
     meta, rest = got[T_MAP]
-    assert meta["full"] and meta["n"] > 100
+    assert got["first_map_full"] and meta["n"] > 100  # a full snapshot first, then voxels
     idx = np.frombuffer(rest[: meta["n"] * 6], "<i2").reshape(-1, 3)
     assert idx[:, 2].min() >= -2  # nothing below the floor
     assert got[T_LIDAR][0]["n"] > 100 and got[T_OCC][1][:4] == b"\x89PNG"

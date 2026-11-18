@@ -256,6 +256,40 @@ and limitations are in **[docs/ONESLAM.md](docs/ONESLAM.md)**, and the plan itse
 Storage is about 350 MB per hour at 1 Hz. Set `scene.record_hz`, `scene.max_frames`, or `scene.record: false` to
 change it.
 
+### Scene graph: what the furniture is, and where things happened
+
+The voxel map says *where* things are; the **scene graph** says *what* they are and how the person relates to them.
+It is a layered 3-D scene graph (room → objects → person and robot → events), rebuilt from the live map every 5 s
+on the robot's CPU (`scenegraph.py`):
+
+* **Objects** are segmented from the registered map without learning: 5 cm columns are binned by their top height
+  (low < 0.35 m, seat < 0.66, table < 1.0, tall < 1.6, wall). Connected parts per band become objects; footprints
+  that are not one compact piece (desks joined in a row, an L-shape) are split by erosion and regrown; a chair's
+  backrest at table height is merged back into its seat. Labels: table, chair, sofa, bed, cabinet, low object, wall.
+  If the MediaPipe object detector is installed (`posture-coach download-models`), its COCO detections are
+  back-projected with depth and vote on the labels.
+* **Relations**: `in`, `next_to`, `at` (chair at table), `sitting_on` / `lying_on` / `on` (the furniture under the
+  hips, checked against the hip height), `near`, `occluded_by` (furniture between the camera and the person),
+  `sees` (robot → person), and `at` for every event.
+
+What uses it:
+
+| | Without the graph | With the graph |
+| --- | --- | --- |
+| Coaching prompt | "user is sitting; neck flexed 28°" | + "The person is sitting on chair 3 at table 1." (the LLM can suggest raising the screen) |
+| Fall check | "dropped out of view while going down" | + "(near table 6, hidden behind table 6)" in the spoken log, the phone push and the caption |
+| Lying for 30 s | floor check fires on a sofa or bed too | only fires when the hips are over the floor |
+| Captions / report | position only | "near table 6"; posture (REBA) per object; fall checks per object |
+| VR | voxels | labelled furniture boxes; the one the person uses is highlighted; HUD line with the relation |
+
+`posture-coach scene-graph <session>` builds `scene/scene_graph.json` for a recorded session; the report and the
+3-D SLAM view show it. On synthetic furnished rooms with ground truth (`scripts/eval_scenegraph.py`), the
+segmentation finds and labels 100 % of 481 objects even with 2 cm noise, 40 % dropout and chairs touching the
+desks; on the real classroom session (no ground truth) it finds 26 tables and 42 chairs, places all 16 fall checks
+within 1 m of a segmented object (10 at tables), and shows the person's mean REBA at each desk.
+
+![Scene graph of the real session](docs/examples/scene_graph.png)
+
 ## Session report on the web
 
 **End session & save report** (button on the live page `:8080`, and on the VR page): closes the current session,

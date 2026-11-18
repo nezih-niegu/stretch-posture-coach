@@ -378,6 +378,8 @@ class _Client:
     occ_sent: float = 0.0
     status_sent: float = 0.0
     barriers_sent: float = 0.0
+    graph_version: int = -1
+    graph_sent: float = 0.0
     captions_version: int = -1
     heat_version: int = -1
     heat_sent: float = 0.0
@@ -870,6 +872,12 @@ class VRServer:
             client.barriers_sent = now
             lines = await asyncio.get_running_loop().run_in_executor(None, w.barrier_lines)
             await conn.send(json.dumps({"type": "barriers", "lines": lines, "d": w.cbf.d}))
+        if getattr(w, "graph_enabled", False) and now - client.graph_sent > 1.0:
+            client.graph_sent = now
+            gm = w.scene_graph_msg()
+            if gm["version"] != client.graph_version or gm.get("person"):
+                client.graph_version = gm["version"]
+                await conn.send(json.dumps(gm, default=float))
         if w.captions_version != client.captions_version:
             client.captions_version = w.captions_version
             await conn.send(json.dumps({"type": "captions", "items": w.captions}, default=float))

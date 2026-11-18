@@ -191,6 +191,26 @@ alarm:
 # Scene understanding: RGB-D keyframes + joint states are recorded with each session; the report builds a
 # static 3-D map of the room (people removed), where the person was and the free space around them.
 # The same recording can be exported to OneSLAM (camera-only SLAM, runs on a GPU machine).
+scene_graph:
+  # Layered 3-D scene graph (room -> objects -> person/robot -> events) built from the live map.
+  # Used for coaching context, fall checks (sofa/bed is not the floor; names the furniture), captions and VR.
+  enabled: true
+  rebuild_s: 5.0              # re-segment the object layer this often (map thread)
+  cell_m: 0.05
+  floor_z_m: 0.08
+  min_area_m2: 0.04
+  max_object_z_m: 2.0         # ignore voxels above this (ceilings, lamps) when segmenting
+  support_margin_m: 0.15      # the person is "on" an object if the hips are within this of its footprint
+  near_m: 0.8
+  event_object_m: 1.0         # attach an event to an object within this distance, else to the floor
+  # optional semantic labels: MediaPipe EfficientDet-Lite0 (COCO); `posture-coach download-models` fetches it.
+  # "auto" = use it if the file exists. Geometric labels are used otherwise.
+  detector: auto
+  detector_model: null        # default: $POSTURE_COACH_HOME/models/efficientdet_lite0.tflite
+  detector_score: 0.4
+  detector_every_keyframes: 3
+  min_votes: 3
+
 scene:
   record: true
   record_hz: 1             # keyframes per second (use 10 for sessions you want to run through OneSLAM)
