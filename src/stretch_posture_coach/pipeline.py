@@ -493,7 +493,12 @@ class Pipeline:
                 self.coach.announce("follow_back", ts)
             elif fs.action == "blocked" and "back-up" in fs.note:
                 self.coach.announce("follow_limit", ts)
-        if fs.action in ("rotate", "approach", "back_off") and self.logger:
+        fkey = (fs.action, fs.note)
+        if (
+            fs.action in ("rotate", "approach", "back_off")
+            and self.logger
+            and fkey != getattr(self, "_last_follow_ev", None)
+        ):
             self.logger.event(
                 {
                     "kind": "follow",
@@ -504,6 +509,7 @@ class Pipeline:
                     "wall_time": time.time(),
                 }
             )
+        self._last_follow_ev = fkey  # one event per decision change, not one per frame
         if self.logger:
             self.logger.log(a, self.head.tilt, fs)
         self.last_assessment = a

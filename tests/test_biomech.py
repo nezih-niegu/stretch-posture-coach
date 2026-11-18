@@ -97,3 +97,12 @@ def test_calibration_offsets_applied():
     assert cal.offsets["neck_flexion"] == pytest.approx(8, abs=1)
     m = metrics(skeleton(neck_flex=8), calibration=cal)
     assert abs(m["neck_flexion"]) < 1.0
+
+
+def test_neck_angle_difference_is_wrapped():
+    """Real session (Nov 17): neck flexion read 336 deg when head and trunk angles sat on opposite sides of
+    +-180 (person bent over / lying). The difference must stay in (-180, 180]."""
+    from stretch_posture_coach.biomech import wrap180
+
+    assert wrap180(170 - (-166)) == pytest.approx(-24)
+    assert wrap180(-170 - 170) == pytest.approx(20)

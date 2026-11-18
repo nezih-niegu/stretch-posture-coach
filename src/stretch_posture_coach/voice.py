@@ -81,6 +81,128 @@ a través de ti. Convierte lo que dijo el especialista en lo que tú le dices a 
 Mediciones actuales: {context}"""
 
 
+# Worked examples for the LLM (small models otherwise answer the specialist instead of relaying)
+RELAY_SHOTS_EN = [
+    ("Ask him how he has been feeling lately.", "How have you been feeling lately?"),
+    ("Tell her to relax her shoulders.", "Please relax your shoulders."),
+    ("Can you tell the patient to sit up straight?", "Please sit up straight."),
+    ("Hello, good afternoon.", "Hello, good afternoon."),
+    ("Tell him his neck looks much better now.", "Your neck looks much better now."),
+]
+RELAY_SHOTS_ES = [
+    ("Pregúntale cómo se ha sentido últimamente.", "¿Cómo te has sentido últimamente?"),
+    ("Dile que relaje los hombros.", "Por favor, relaja los hombros."),
+    ("¿Le puedes decir que se siente derecho?", "Por favor, siéntate derecho."),
+    ("Hola, buenas tardes.", "Hola, buenas tardes."),
+]
+# replies that talk back to the specialist / the robot instead of relaying -> rejected
+_BAD = re.compile(
+    r"\b(specialist|especialista|assist you|help you today|i'll make sure|i will make sure|i can help|"
+    r"yes,? i can|thanks for the instruction|claro que sí,? puedo|te ayudo)\b|^\s*(hello,? )?stretch\b",
+    re.I,
+)
+_TELL_EN = re.compile(
+    r"^(?:(?:hello|hi|hey),?\s*)?(?:stretch[,.]?\s*)?(?:(?:can|could|would) you\s+|please\s+)?"
+    r"(tell|ask|asked)\s+(?:the\s+)?(?:patient|person|him|her|them|user)\s+(?:to\s+)?(.+?)[.?!]*$",
+    re.I,
+)
+_TELL_ES = re.compile(
+    r"^(?:(?:hola|oye),?\s*)?(?:stretch[,.]?\s*)?¿?\s*(?:(?:le\s+)?puedes\s+)?"
+    r"(dile|pídele|decirle|pedirle|pregúntale|preguntarle)\s+(?:al paciente\s+|a la paciente\s+)?(?:que\s+)?"
+    r"(.+?)[.?!]*$",
+    re.I,
+)
+_ASK_WORDS = (
+    "how",
+    "what",
+    "if",
+    "whether",
+    "when",
+    "where",
+    "why",
+    "do",
+    "does",
+    "are",
+    "is",
+    "has",
+    "have",
+    "can",
+)
+_PRON = [
+    (r"\bhas he\b", "have you"),
+    (r"\bhas she\b", "have you"),
+    (r"\bis he\b", "are you"),
+    (r"\bis she\b", "are you"),
+    (r"\bdoes he\b", "do you"),
+    (r"\bdoes she\b", "do you"),
+    (r"\bhe has\b", "you have"),
+    (r"\bshe has\b", "you have"),
+    (r"\bhe is\b", "you are"),
+    (r"\bshe is\b", "you are"),
+    (r"\bhe feels\b", "you feel"),
+    (r"\bshe feels\b", "you feel"),
+    (r"\bhe needs\b", "you need"),
+    (r"\bshe needs\b", "you need"),
+    (r"\bhe\b", "you"),
+    (r"\bshe\b", "you"),
+    (r"\bhis\b", "your"),
+    (r"\bher\b", "your"),
+    (r"\bhim\b", "you"),
+    (r"\bhimself\b", "yourself"),
+    (r"\bherself\b", "yourself"),
+    (r"\bthey are\b", "you are"),
+    (r"\btheir\b", "your"),
+    (r"\bthem\b", "you"),
+    (r"\bI need\b", "the specialist needs"),
+    (r"\bI want\b", "the specialist wants"),
+    (r"\bI\b", "the specialist"),
+    (r"\bme\b", "the specialist"),
+    (r"\bmy\b", "the specialist's"),
+]
+
+
+def rule_relay(heard: str, spanish: bool) -> str | None:
+    """Deterministic rewrite of clear relay commands ("tell the patient to X", "ask him how he is").
+    Returns None when the sentence isn't one of those (then the LLM handles it)."""
+    t = heard.strip().strip('"')
+    if spanish:
+        m = _TELL_ES.match(t)
+        if not m:
+            return None
+        verb, rest = m.group(1).lower(), m.group(2).strip()
+        if verb.startswith(
+            ("pregunt", "pregúnt")
+        ):  # "pregúntale cómo se siente" -> "¿Cómo se siente?" (usted)
+            return f"¿{rest[0].upper()}{rest[1:]}?"
+        return None  # "dile que se siente" needs conjugation (-> "siéntate"): the LLM does that
+    m = _TELL_EN.match(t)
+    if not m:
+        return None
+    verb, rest = m.group(1).lower(), m.group(2).strip()
+    for a, b in _PRON:
+        rest = re.sub(a, b, rest, flags=re.I)
+    first = rest.split(" ", 1)[0].lower()
+    if verb.startswith("ask") and first in _ASK_WORDS:
+        words = rest.split(" ")
+        if words[0].lower() in ("if", "whether"):
+            words = words[1:]
+            q = " ".join(words)  # "if you feel pain" -> "do you feel pain"
+            q = re.sub(r"^you (are|have|can)\b", lambda mm: f"{mm.group(1)} you", q, flags=re.I)
+            q = re.sub(r"^you (feel|need|want)\b", r"do you \1", q, flags=re.I)
+        else:
+            q = " ".join(words)  # "how you have been" -> "how have you been"
+            q = re.sub(
+                r"^(how|what|when|where|why) you (have|are|were|do|did)\b", r"\1 \2 you", q, flags=re.I
+            )
+            q = re.sub(r"^(how|what|when|where|why) you (feel|felt|need)\b", r"\1 do you \2", q, flags=re.I)
+        return q[0].upper() + q[1:] + "?"
+    return f"Please {rest[0].lower()}{rest[1:]}."
+
+
+def is_bad_relay(text: str) -> bool:
+    return bool(_BAD.search(text))
+
+
 def posture_context(a) -> str:
     if a is None or not getattr(a, "present", False):
         return "the person is not in view"
@@ -226,7 +348,12 @@ class VoiceRelay:
 
     def compose(self, heard: str) -> tuple[str, str]:
         """What Stretch says for the expert's words: (text, "llm" | "verbatim")."""
-        if self.mode == "verbatim" or self.llm is None:
+        if self.mode == "verbatim":
+            return clean_spoken(heard, 400), "verbatim"
+        ruled = rule_relay(heard, self.persona.spanish)
+        if ruled:  # "tell the patient to ..." - no need for the LLM (and no chance for it to talk back)
+            return clean_spoken(ruled, 400), "rule"
+        if self.llm is None:
             return clean_spoken(heard, 400), "verbatim"
         robot = self.coach_cfg.get("robot_name", "Stretch")
         ctx = posture_context(self.context())
@@ -239,18 +366,21 @@ class VoiceRelay:
             sys_prompt = RELAY_EN.format(
                 robot=robot, language=self.coach_cfg.get("language", "English"), context=ctx
             )
+        shots = RELAY_SHOTS_ES if self.persona.spanish else RELAY_SHOTS_EN
+        msgs = [{"role": "system", "content": sys_prompt}]
+        for u, a in shots:
+            msgs += [{"role": "user", "content": f"Specialist: {u}"}, {"role": "assistant", "content": a}]
+        msgs.append({"role": "user", "content": f"Specialist: {heard}"})
         try:
-            out = self.llm.chat(
-                [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": f"Specialist: {heard}"},
-                ],
-                max_tokens=int(self.c.get("max_tokens", 90)),
-            )
+            out = self.llm.chat(msgs, max_tokens=int(self.c.get("max_tokens", 90)))
             out = re.sub(r"^\s*(stretch|robot|you|tú|yo)\s*:\s*", "", out.strip(), flags=re.I)
             out = clean_spoken(out, 400)
-            if out:
+            if out and not is_bad_relay(out) and len(out) <= 2.5 * len(heard) + 40:
                 return out, "llm"
+            if out:
+                log.info(
+                    "voice relay: rejected LLM reply %r (talks back / adds content): speaking the words", out
+                )
         except Exception as e:
             log.warning("voice relay LLM failed (%s): speaking the transcript", e)
         return clean_spoken(heard, 400), "verbatim"

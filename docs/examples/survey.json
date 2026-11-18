@@ -1,0 +1,26 @@
+{
+ "ok": true,
+ "error": null,
+ "duration_s": 48.2,
+ "head_steps": 10,
+ "base_spin_deg": 360,
+ "checks": {
+  "lidar": true,
+  "floor": true,
+  "map": true
+ },
+ "lidar": {
+  "enabled": true,
+  "matched": 379,
+  "rejected": 0,
+  "score": 0.69,
+  "map_scans": 63
+ },
+ "floor": {
+  "floor_fits": 76,
+  "tilt_offset_deg": 0.18,
+  "roll_deg": 0.06,
+  "height_offset_m": -0.01
+ },
+ "map_voxels": 54341
+}

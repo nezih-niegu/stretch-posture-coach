@@ -829,7 +829,9 @@ def download_models_cmd(
             WhisperTranscriber(stt_model, models_dir).load()
             typer.echo(f"speech-to-text: whisper {stt_model} in {models_dir / 'whisper'}")
         except Exception as e:
-            typer.echo(f"warning: speech-to-text model download failed ({e}); VR push-to-talk won't work", err=True)
+            typer.echo(
+                f"warning: speech-to-text model download failed ({e}); VR push-to-talk won't work", err=True
+            )
     if not skip_voices:
         import subprocess
 

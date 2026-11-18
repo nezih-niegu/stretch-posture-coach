@@ -25,6 +25,45 @@ Everything runs on the robot (NUC12 i5-1240P). No cloud.
    web viewer :8080 · CSV/JSONL session log · HTML report
 ```
 
+## Example: a real session
+
+A 14-minute session on Stretch 3 `stretch-se3-3075` (17 Nov 2026), with fall tests and a few minutes of expert
+control from a Meta Quest 3S. These images have people removed; nothing here shows a camera frame of a person.
+
+**Start-of-session survey** ([`survey.json`](docs/examples/survey.json)): passed in **48 s**.
+* 10 head positions and a **360° base spin**.
+* **379 lidar scans matched, 0 rejected** (match score 0.69).
+* 76 floor-plane fits. The camera was already well calibrated: tilt offset **+0.18°**, roll 0.06°, height −1 cm.
+
+**Mode timeline** from `events.jsonl`:
+1. autonomous → **survey** at the session start.
+2. A fall test interrupted the sweep: survey → **fall response**.
+3. The survey resumed afterwards and finished: → **autonomous**.
+4. Three more fall checks went to fall response and back.
+5. The expert took control (→ **teleop**) and later released it (→ autonomous).
+
+| | |
+|---|---|
+| ![3-D SLAM view with captions and the posture heat map](docs/examples/slam_view.jpg) | ![Top-down map with lidar walls, heat map and numbered captions](docs/examples/top_down_map.jpg) |
+| **SLAM view** (`/sessions/<id>/scene3d`): 273k voxels registered with lidar SLAM + head joints + floor plane, a classroom with rows of desks. Pins are fall checks (amber), alarms (red) and recoveries (green); overlapping labels shrink to their number. | **Top-down map**: free floor (light), furniture by height (blue), the posture heat map (49 cells of 25 cm), numbered captions. The person walked 35 m and stayed ~0.75 m from furniture on average. |
+| ![REBA over time](docs/examples/reba_over_time.png) | ![Distance to Stretch](docs/examples/distance_to_stretch.png) |
+| **REBA** while in view: 53 % negligible/low, 44 % medium, 2.6 % high. | **Distance to Stretch**: follow mode backed off toward the 2–3 m band (min 1–3). The expert had control from min 3 to 13 (follow paused) and drove it to about 1 m. |
+
+![Control barrier lines in the VR bird's-eye view (simulator)](docs/examples/sim_barriers.jpg)
+
+*Simulator:* the **control-barrier keep-out lines** around everything the lidar sees (blue = clear), the robot's
+footprint circles, the lidar scan (orange dots), the room scan and two captions.
+
+**Talking through Stretch.** These are transcripts from this session. A small LLM often *answered the specialist*
+instead of relaying, so clear commands are now rewritten by rules, and replies that talk back are rejected:
+
+| The expert said (speech-to-text) | Before (LLM) | Now |
+|---|---|---|
+| "Ask the patient to stand up." | "Stand up and try to feel your posture, then stand up again…" | "Please stand up." |
+| "Hello, Stretch. Can you tell the patient to stand up?" | "Hello, Stretch. Yes, I can help the patient stand up." | "Please stand up." |
+| "Asked the patient how has he been doing lately?" | "Hello! How have you been feeling lately?" | "How have you been doing lately?" |
+| "Pass the trap." | "Thanks for the instruction, specialist. I'll make sure to pass the trap." | rejected → says "Pass the trap." |
+
 ## Install (one command)
 
 On the robot (`hello-robot@stretch-se3-XXXX`):

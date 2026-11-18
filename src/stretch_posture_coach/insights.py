@@ -347,7 +347,9 @@ def stack_captions(captions: list[dict], radius: float = 0.45, step: float = 0.3
             continue
         x, y = c["pos"][0], c["pos"][1]
         n = sum(1 for (px, py) in placed if math.hypot(px - x, py - y) < radius)
-        c["lift"] = round(n * step, 2)
+        c["lift"] = round(
+            (n % 4) * step, 2
+        )  # at most 4 levels (many events at one spot: the labels declutter)
         placed.append((x, y))
     return captions
 

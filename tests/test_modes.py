@@ -199,7 +199,7 @@ def test_voice_relay_stt_llm_tts_and_partials():
     assert any(n.get("partial") for n in notes)  # live partial transcript while talking
     assert notes[-1]["state"] == "spoken" and notes[-1]["heard"] == "dile que se siente derecho"
     assert (
-        "norteño" in llm.messages[0]["content"] and "dile que se siente derecho" in llm.messages[1]["content"]
+        "norteño" in llm.messages[0]["content"] and "dile que se siente derecho" in llm.messages[-1]["content"]
     )
     assert events[-1]["kind"] == "expert" and events[-1]["source"] == "llm"
 
@@ -220,3 +220,32 @@ def test_voice_relay_verbatim_and_too_short():
     vr.end()
     time.sleep(0.3)
     assert spoken == ["Keep your back straight."]
+
+
+@pytest.mark.parametrize(
+    "heard,said",
+    [  # transcripts from a real session (Nov 17)
+        ("Ask the patient to stand up.", "Please stand up."),
+        ("Hello, Stretch. Can you tell the patient to stand up?", "Please stand up."),
+        ("Asked the patient how has he been doing lately?", "How have you been doing lately?"),
+        ("Ask her if she feels any pain", "Do you feel any pain?"),
+        ("Tell her to relax her shoulders", "Please relax your shoulders."),
+        ("Pregúntale cómo se siente", "¿Cómo se siente?"),
+    ],
+)
+def test_relay_rules_for_clear_commands(heard, said):
+    from stretch_posture_coach.voice import rule_relay
+
+    assert rule_relay(heard, heard.startswith("Pregúnt")) == said
+
+
+def test_relay_rejects_llm_replies_that_talk_back():
+    from stretch_posture_coach.voice import VoiceRelay
+
+    class TalksBack:
+        def chat(self, messages, max_tokens=None):
+            return "Thanks for the instruction, specialist. I'll make sure to pass the trap."
+
+    vr = VoiceRelay(load_config(), print, TalksBack(), FakeSTT(""))
+    assert vr.compose("Pass the trap.") == ("Pass the trap.", "verbatim")  # the words, not the chatbot reply
+    assert vr.compose("Ask the patient to stand up.") == ("Please stand up.", "rule")  # no LLM needed

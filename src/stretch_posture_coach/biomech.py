@@ -198,8 +198,9 @@ def compute_metrics(
     # ---- neck / head ----
     if head_ok:
         head = ear_mid - sh_mid
-        m["neck_flexion"] = plane_angle(head, up, fwd) - m["trunk_flexion"]
-        m["neck_side_bend"] = plane_angle(head, up, left) - m["trunk_side_bend"]
+        # differences of two angles in (-180, 180] can leave that range (e.g. 336° = -24°): wrap them
+        m["neck_flexion"] = wrap180(plane_angle(head, up, fwd) - m["trunk_flexion"])
+        m["neck_side_bend"] = wrap180(plane_angle(head, up, left) - m["trunk_side_bend"])
         m["head_forward_cm"] = float(np.dot(head, fwd)) * 100.0
         if p.ok("l_ear", "r_ear"):
             m["neck_twist"] = wrap180(
@@ -216,6 +217,8 @@ def compute_metrics(
         for key in CALIBRATED_KEYS:
             if key in m and key in calibration.offsets:
                 m[key] -= calibration.offsets[key]
+                if key != "head_forward_cm":
+                    m[key] = wrap180(m[key])
     for side in ("l", "r"):
         base = calibration.ear_shoulder_cm.get(side)
         cur = m.get(f"{side}_ear_shoulder_cm")
