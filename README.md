@@ -7,7 +7,7 @@ watches you with its head camera, estimates joint angles, **RULA / REBA** ergono
 (L5/S1 compression, neck load). When a bad posture lasts too long, it **tells you out loud** how to fix it,
 using a local LLM (**Ollama + qwen2**) and an offline neural voice (Piper, with espeak-ng as fallback).
 
-Everything runs on the robot (NUC12 i5-1240P).
+Everything runs on the robot (NUC12 i5-1240P). No cloud.
 
 ```
  D435i head camera ──► MediaPipe Pose Landmarker (33 3-D landmarks, ~25 FPS)
@@ -230,6 +230,50 @@ sessions are listed at `/sessions`. Each report includes time in RULA/REBA risk 
 charts (neck/trunk flexion, L5/S1 load, RULA/REBA, distance to Stretch) and a transcript of **what Stretch
 said and why**. To browse reports later without starting a session, run `posture-coach serve`.
 
+## Modes, the 360° survey and control barrier functions
+
+**Who is in charge** is a small state machine (`modes.py`). Each state owns the head, base, arm and coaching:
+
+| Mode | Head | Base | Arm | Coaching |
+|---|---|---|---|---|
+| **SURVEY** (start of every session) | 360° sweep | survey spin | - | background |
+| **AUTONOMOUS** | tracks you / follows the VR headset | follow mode | - | speaks |
+| **TELEOP** (expert took control) | expert's headset | expert's joysticks | expert | background |
+| **FALL_RESPONSE** | tracks you | stopped | - | off (only the fall check / alarm) |
+| **SAFE_STOP** (runstop) | holds | stopped | - | background |
+
+Transitions:
+* A new session goes from AUTONOMOUS to SURVEY, then to AUTONOMOUS when the survey finishes.
+* Take control goes to TELEOP from any of SURVEY, AUTONOMOUS or FALL_RESPONSE. Releasing it goes back.
+* A fall goes to FALL_RESPONSE. During TELEOP the expert stays in charge while the alarm still runs.
+* The runstop goes to SAFE_STOP and back.
+* If something interrupts a survey, it runs again afterwards.
+
+Every change is logged (`events.jsonl`, kind `mode`) and shown in the VR HUD. To add a new capability, add a
+state, its policy and its transitions.
+
+**360° survey: recalibrates at every session start** (including after "End session"):
+1. A **new lidar SLAM map** is started (the map frame = where the robot stands now).
+2. The **floor-plane correction** of the head camera is measured from scratch.
+3. The head **sweeps about 315°** at a floor-seeing tilt (the lidar covers the full 360° on every scan).
+4. If the barriers allow it, the base **spins 360°** in 30° steps (`survey.rotate_base: auto | true | false`).
+5. The head returns to the front.
+
+It takes about 20–50 s and passes when there are matched lidar scans, a floor fit and enough mapped room.
+The result goes to `survey.json` and the log. Disable it with `survey.enabled: false`.
+
+**Control barrier functions** (`cbf.py`). Every lidar return `o` is a barrier
+`h = ‖c − o‖² − d²` on two circles covering the base footprint (d = 0.21 m + 0.20 m margin).
+* **Velocity commands** (the expert's joysticks) pass a QP filter, `min ‖u − u_ref‖` subject to
+  `ḣ ≥ −α·h`, so they are changed as little as possible. The robot slows smoothly and stops at the barrier, and
+  turning away or backing off stays free.
+* **Position steps** (follow mode, the survey spin) use the discrete-time condition `h⁺ ≥ (1 − γ)·h`.
+* People are barriers too: the lidar sees legs.
+* **VR shows the keep-out lines (h = 0)** as low fences around what the lidar sees: blue = clear,
+  amber = close, red = a barrier is currently limiting the command. The footprint circles are drawn around the
+  robot avatar.
+* Tune them under `safety:` (`margin_m`, `alpha`).
+
 ## VR telepresence (Meta Quest 3/3S browser)
 
 While a session runs (`posture-coach run`, `posture-coach follow`, ...), a second web service streams a
@@ -239,8 +283,15 @@ While a session runs (`posture-coach run`, `posture-coach follow`, ...), a secon
 2. Go to **`https://<robot-ip>:8443/`**. The robot prints the exact URL at start-up.
 3. The first time you'll see "Your connection is not private". Tap **Advanced → Proceed**. The robot uses a
    self-signed certificate because WebXR only works over https.
-4. Tap **Enter VR**. You start in the "arm view", standing next to Stretch's mast. The left trigger toggles
-   between the arm view and the robot's head view.
+4. Tap **Enter VR**. **Where you are looking when you enter is Stretch's "front"** (0 rotation). The robot head
+   starts looking to the front. From then on it turns by the same amount you turn your head, measured from that
+   starting pose (X turns this on/off). The world rides along with the robot, so its front stays in front of you.
+5. **Y switches cameras:**
+   * **head RealSense D435i** (default): first person from Stretch's head, inside the registered scan;
+   * **gripper RealSense D405**: its own live RGB-D 3-D view, as if your eyes were on the gripper;
+   * **overview**: behind and above Stretch.
+
+   Hold Y to toggle the overlays (heat map, captions and barrier lines).
 
 ### One registered scan (lidar SLAM + depth)
 
@@ -295,16 +346,31 @@ expert can have control at a time. Five wrong PINs lock the PIN entry for 60 s. 
 | **A / B** | **open / close the gripper**. The right controller **vibrates with the grip force** (gripper motor effort), with a click on first contact. Lift/arm contact also vibrates. |
 | **Right stick click** | wrist following on/off |
 | **Left stick** | drive: forward/back, left/right **turns** (Stretch is differential-drive and can't strafe) |
-| **Left stick click** | pause/resume control (follow mode resumes while paused) |
-| **X** | robot head follows your head |
+| **Right stick** | also drives, at 40 % for fine moves |
+| **Left stick click** | pause/resume control: paused = Stretch's routine comes back to the foreground |
+| **X** | robot head follows your head (relative to your starting pose) |
+| **Y** | switch camera (head D435i → gripper D405 → overview); hold = overlays |
+| **Left trigger (hold)** | **talk through Stretch** (push-to-talk, see below) |
 | **Bare hands** | put the controllers down: the **right hand** moves the arm while the **left hand pinches** (clutch), and the right thumb–index distance sets the gripper opening. No joystick or vibration without controllers. |
 
-While the expert has control, **follow mode is paused** (the HUD and the log say "expert teleop").
+Taking control switches the robot to the **TELEOP** mode (see *Modes* below). The coaching routine runs **in the
+background** during TELEOP: posture is still measured, logged and heat-mapped, but Stretch doesn't speak tips
+and follow mode is off. Pausing or releasing control brings the routine back to the foreground.
+
+**Talk through Stretch.** Hold the **left trigger** in VR, or the "Hold to talk" button on the page, and speak.
+* The Quest microphone streams to the robot.
+* Offline speech-to-text (**faster-whisper**, on the robot's CPU) shows a live transcript in the HUD.
+* On release, the **local LLM turns your words into what Stretch says**, in its persona and language.
+* Stretch speaks it with **its own voice**.
+
+Set `voice.mode: verbatim` to skip the LLM, and `voice.stt_model: small` for better Spanish. Allow the
+microphone when the page asks; tapping "Take control" asks for it. Only the PIN-authenticated expert can talk.
 
 Safety:
 * The base stops 0.4 s after the last headset message. The robot helper has its own 0.3 s watchdog.
 * Speed is capped at 0.25 m/s (0.3 hard cap) and 0.6 rad/s.
-* Driving forward or backward **slows and stops before obstacles in the lidar scan**. That includes the patient.
+* Every base command passes the **control barrier functions** built from the lidar scan (see below). There is
+  also a hard emergency stop 0.12 m from the footprint.
 * The runstop is respected, and the arm/lift only move if the robot is **homed** (`stretch_robot_home.py`).
 
 Settings are under `teleop:` in the config, including the gripper effort → vibration mapping and
@@ -391,6 +457,10 @@ camera:  {rotate: cw90}
 | VR scan looks doubled / floors stacked | check the SLAM status in the HUD (`lidar SLAM <score>`). With `no lidar: odometry`, run `posture-coach lidar-test`. If the lidar works but the walls are mirrored or rotated, set `lidar.yaw_offset_deg` / `lidar.clockwise`. The floor correction needs the floor in view at least once (tilt the head down). |
 | VR: wide-angle camera panel is sideways | set `vr.nav_rotate` (cw90/ccw90/180); disable with `vr.nav_camera: false` |
 | Teleop: "wrong PIN" / nothing moves | the PIN changes every run unless `teleop.pin` is set (see the log line `EXPERT TELEOP PIN`). The HUD shows notes such as `arm not homed` (run `stretch_robot_home.py`), `runstop pressed`, or `obstacle 0.25 m ahead: stopped` (lidar guard). |
+| VR: the robot head turns the wrong way when I turn | set `vr.look_yaw_sign: -1` (or `look_pitch_sign`). "Front" is `follow.forward_pan_rad` / `robot.front_tilt_rad`. Re-enter VR to reset the zero. |
+| Push-to-talk: "speech-to-text failed" | run `posture-coach download-models` once (downloads the whisper model); allow the microphone in the Quest browser |
+| Survey FAILED in the log | read `survey.json`: `floor` = the head never saw the floor (lower `survey.tilt_rad`), `lidar` = check `lidar-test`, `map` = too dark / no depth |
+| Base won't move closer to something | that's a control barrier (red line in VR). Lower `safety.margin_m` with care. |
 | Teleop: arm extends when I pull my hand back | set `teleop.arm_axis_sign: 1` |
 | Teleop: gripper vibrates all the time / never | adjust `teleop.gripper_effort_free` / `gripper_effort_full` (gripper motor effort in %); the grip-force bar in the HUD shows the current level |
 | Messages are slow | Normal first time (model load). Use `qwen2:0.5b`, or run Ollama on your laptop: `--host http://<laptop-ip>:11434`. On the laptop, start it with `OLLAMA_HOST=0.0.0.0 ollama serve`. |

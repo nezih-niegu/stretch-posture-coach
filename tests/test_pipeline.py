@@ -87,6 +87,7 @@ def cfg(tmp_path):
         overrides={
             "logging": {"sessions_dir": str(tmp_path / "sessions")},
             "analysis": {"calibration_file": str(tmp_path / "cal.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "coach": {"min_interval_s": 5, "greet": False},
             "thresholds": {"hold_s": 3},
         }

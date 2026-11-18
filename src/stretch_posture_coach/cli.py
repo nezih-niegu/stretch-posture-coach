@@ -813,13 +813,23 @@ def download_models_cmd(
     models_dir: Path = typer.Option(None, help="Where to store models (default: $POSTURE_COACH_HOME/models)"),
     voices: list[str] = typer.Option(["en_US-lessac-medium"], "--voice", help="Piper voices (repeatable)"),
     skip_voices: bool = typer.Option(False, "--skip-voices"),
+    stt_model: str = typer.Option("base", "--stt-model", help="faster-whisper model for VR push-to-talk"),
+    skip_stt: bool = typer.Option(False, "--skip-stt"),
 ) -> None:
-    """Download MediaPipe pose models (lite/full/heavy) and Piper voices."""
+    """Download MediaPipe pose models (lite/full/heavy), Piper voices and the speech-to-text model."""
     from .pose import download_models
 
     models_dir = models_dir or home() / "models"
     for p in download_models(models_dir):
         typer.echo(f"pose model: {p}")
+    if not skip_stt:
+        try:
+            from .voice import WhisperTranscriber
+
+            WhisperTranscriber(stt_model, models_dir).load()
+            typer.echo(f"speech-to-text: whisper {stt_model} in {models_dir / 'whisper'}")
+        except Exception as e:
+            typer.echo(f"warning: speech-to-text model download failed ({e}); VR push-to-talk won't work", err=True)
     if not skip_voices:
         import subprocess
 

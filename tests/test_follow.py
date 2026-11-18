@@ -156,6 +156,7 @@ def test_pipeline_follow_end_to_end(tmp_path):
         overrides={
             "logging": {"sessions_dir": str(tmp_path / "s")},
             "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "follow": {"enabled": True},
             "coach": {"greet": False, "persona": "norteno"},
         }
@@ -192,6 +193,7 @@ def test_pipeline_follow_backoff_announces_in_norteno(tmp_path):
         overrides={
             "logging": {"enabled": False},
             "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "follow": {"enabled": True},
             "coach": {"greet": False, "persona": "norteno"},
         }

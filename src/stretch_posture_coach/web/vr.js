@@ -33,9 +33,9 @@ const M_MAP = new THREE.Matrix4().set(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0
 const stage = new THREE.Group();          // children are in MAP coordinates
 stage.matrixAutoUpdate = false;
 scene.add(stage);
-const place = { yaw: 0, tx: 0, tz: 0 };   // stage placement in the headset space
+const place = { yaw: 0, tx: 0, ty: 0, tz: 0 };   // stage placement in the headset space
 function updateStage() {
-  const m = new THREE.Matrix4().makeTranslation(place.tx, 0, place.tz);
+  const m = new THREE.Matrix4().makeTranslation(place.tx, place.ty, place.tz);
   m.multiply(new THREE.Matrix4().makeRotationY(place.yaw)).multiply(M_MAP);
   stage.matrix.copy(m);
   stage.matrixWorldNeedsUpdate = true;
@@ -441,11 +441,20 @@ function drawHud() {
   const { ctx, canvas } = hud, h = S.lastHud || {};
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = 'rgba(16,17,22,0.88)'; ctx.beginPath(); ctx.roundRect(0, 0, canvas.width, canvas.height, 28); ctx.fill();
-  ctx.fillStyle = '#ffd27a'; ctx.font = 'bold 38px system-ui'; ctx.fillText('STRETCH POSTURE COACH', 32, 56);
+  const st = S.status || {}, md = st.mode || {};
+  const MODE_COL = { survey: '#3987e5', autonomous: '#50c850', teleop: '#ec835a', fall_response: '#d03b3b', safe_stop: '#d03b3b' };
+  ctx.fillStyle = MODE_COL[md.mode] || '#ffd27a'; ctx.font = 'bold 36px system-ui';
+  let title = (md.label || 'Stretch posture coach').toUpperCase();
+  const sv = st.survey;
+  if (md.mode === 'survey' && sv) title += `  ${sv.phase} ${sv.phase === 'sweep' ? `${sv.step + 1}/${sv.steps}` : ''}`;
+  ctx.fillText(title, 32, 56);
+  ctx.font = '24px system-ui'; ctx.fillStyle = '#c3c2b7'; ctx.textAlign = 'right';
+  ctx.fillText(VIEW_NAMES[S.view] || '', canvas.width - 32, 56); ctx.textAlign = 'left';
   ctx.font = '26px system-ui'; ctx.fillStyle = '#9aa0aa';
   const w = S.world || {};
   const lid = w.lidar && w.lidar.enabled ? `lidar SLAM ${w.lidar.score}` : 'no lidar: odometry';
-  ctx.fillText(`${S.connected ? 'live' : 'offline'} · ${S.fps.toFixed(0)} fps · ${S.latency.toFixed(0)} ms · ${lid} · ${(S.mapVoxels || 0).toLocaleString()} voxels`, 32, 94);
+  const bar = S.barriers ? ` · ${S.barriers} barriers${S.barrierActive ? ' (ACTIVE)' : ''}` : '';
+  ctx.fillText(`${S.connected ? 'live' : 'offline'} · ${S.fps.toFixed(0)} fps · ${S.latency.toFixed(0)} ms · ${lid} · ${(S.mapVoxels || 0).toLocaleString()} voxels${bar}`, 32, 94);
   let y = 146;
   const risk = (s) => (s == null ? '#ccc' : s >= 5 ? '#eb3c3c' : s >= 3 ? '#ffc800' : '#50c850');
   if (h.present === false) { ctx.fillStyle = '#ffc800'; ctx.font = '32px system-ui'; ctx.fillText('No person in view', 32, y); y += 48; }
@@ -482,6 +491,18 @@ function drawHud() {
       if (t.note) { ctx.fillStyle = '#fab219'; ctx.fillText(`▲ ${t.note}`, 32, y); y += 34; }
     }
   }
+  // voice relay
+  const vo = S.voice;
+  if (vo && performance.now() - (vo.t || 0) < 12000) {
+    y += 6; ctx.font = '25px system-ui';
+    if (vo.state === 'listening') { ctx.fillStyle = '#ec835a'; y = wrap(ctx, `● REC  ${vo.partial || 'listening…'}`, 32, y, canvas.width - 64, 32, 2); }
+    else if (vo.state === 'transcribing' || vo.state === 'thinking') { ctx.fillStyle = '#c3c2b7'; y = wrap(ctx, `… ${vo.heard || vo.state}`, 32, y, canvas.width - 64, 32, 2); }
+    else if (vo.state === 'spoken') { ctx.fillStyle = '#7fd07f'; y = wrap(ctx, `Stretch said: “${vo.said}”`, 32, y, canvas.width - 64, 32, 2); }
+  }
+  if (S.toast && performance.now() - S.toast.t < 3000) {
+    ctx.fillStyle = 'rgba(57,135,229,0.9)'; ctx.fillRect(24, canvas.height - 150, canvas.width - 48, 44);
+    ctx.fillStyle = '#fff'; ctx.font = '24px system-ui'; ctx.fillText(S.toast.text.slice(0, 70), 36, canvas.height - 120);
+  }
   // heat legend
   if (S.overlay && S.heatLegend) {
     const L = S.heatLegend, yy = canvas.height - 96, x0 = 32, wL = 300;
@@ -490,7 +511,7 @@ function drawHud() {
     ctx.fillText('better', x0, yy + 40); ctx.textAlign = 'right'; ctx.fillText('worse posture (REBA)', x0 + wL, yy + 40); ctx.textAlign = 'left';
   }
   ctx.fillStyle = '#898781'; ctx.font = '22px system-ui';
-  ctx.fillText(`X head follows you: ${S.headControl ? 'ON' : 'off'} · Y overlays: ${S.overlay ? 'ON' : 'off'} · L-trigger: snap to robot`, 32, canvas.height - 24);
+  ctx.fillText(`X head follows you: ${S.headControl ? 'ON' : 'off'} · Y camera (hold: overlays) · L-trigger: talk`, 32, canvas.height - 24);
   const al = S.alarm;
   if (al.active) {
     const on = Math.floor(performance.now() / 500) % 2 === 0 || al.state !== 'alarm';
@@ -533,6 +554,16 @@ function onText(s) {
   if (s.type === 'heat') return applyHeat(s);
   if (s.type === 'teleop') { S.teleop = s.state; if (s.state === 'granted') S.teleopOn = true; updateTeleopUi(s); return; }
   if (s.type === 'teleop_fb') { S.tfb = s; return hapticFeedback(s.haptics); }
+  if (s.type === 'status') { S.status = s; return; }
+  if (s.type === 'barriers') return applyBarriers(s);
+  if (s.type === 'voice') {
+    S.voice = { ...(S.voice || {}), ...s, t: performance.now() };
+    if (s.error) toast(s.error);
+    if (s.state === 'spoken') { $('vstate').textContent = `Stretch said: “${s.said}”`; }
+    else if (s.partial) $('vstate').textContent = `… ${s.partial}`;
+    else $('vstate').textContent = s.state === 'listening' ? 'listening…' : (s.state || '');
+    return;
+  }
   if (s.type === 'state' && s.state === 'ended') {
     msg('Session ended - opening the report…');
     const go = () => { location.href = s.report || '/sessions'; };
@@ -566,12 +597,32 @@ async function handleBinary(buf, type) {
     S.robot = meta.robot || null; S.world = meta.world || null; S.registered = meta.registered || '-';
     updateAvatar(S.robot, S.T);
     S.lastHud = meta.hud || {}; S.ceiling = meta.ceiling || 2.2; mapMat.uniforms.ceiling.value = S.ceiling;
-    if (!S.initDone) { S.headControl = meta.head_control_default; S.initDone = true; setTimeout(() => snap(0), 50); }
+    if (!S.initDone) { S.headControl = meta.head_control_default; S.initDone = true; setTimeout(setReference, 50); }
     if (meta.rtt_ms != null) S.latency = meta.rtt_ms;
     frames++;
     const now = performance.now();
     if (now - lastFpsT > 1000) { S.fps = frames * 1000 / (now - lastFpsT); frames = 0; lastFpsT = now; }
     if (!renderer.xr.isPresenting) msg(`live · ${S.fps.toFixed(0)} fps · ${S.registered}`);
+  } else if (type === 7) {   // gripper D405 RGB-D: panel + immersive surface for the gripper view
+    const il = dv.getUint32(off, true); off += 4;
+    const blob = new Blob([new Uint8Array(buf, off, il)], { type: 'image/jpeg' }); off += il;
+    const depth = new Uint16Array(buf.slice(off));
+    const bitmap = await createImageBitmap(blob);
+    if (!gripLive || gripLive.dw !== meta.dw || gripLive.dh !== meta.dh) {
+      if (gripLive) gripView.remove(gripLive.mesh);
+      gripLive = new Surface(meta.dw, meta.dh);
+      gripLive.material.uniforms.personOnly.value = 0;
+      gripLive.material.uniforms.jump.value = 0.12;
+      gripView.add(gripLive.mesh);
+    }
+    gripLive.update(meta, depth, bitmap);
+    gripLive.mesh.matrix.identity(); gripLive.mesh.matrixWorldNeedsUpdate = true;
+    const panelBmp = await createImageBitmap(blob);
+    if (gripPanel.tex.image && gripPanel.tex.image.close) gripPanel.tex.image.close();
+    gripPanel.tex.image = panelBmp; gripPanel.tex.needsUpdate = true;
+    gripPanel.mesh.scale.set(1, (meta.h / meta.w) / (gripPanel.h / gripPanel.w), 1);
+    gripPanel.mesh.visible = S.view !== 'gripper';
+    S.gripperDepth = true;
   } else if (type === 2 || type === 3) {
     const p = type === 2 ? gripPanel : navPanel;
     const bitmap = await createImageBitmap(new Blob([new Uint8Array(buf, off)], { type: 'image/jpeg' }));
@@ -590,8 +641,18 @@ async function handleBinary(buf, type) {
   }
 }
 
-// ------------------------------------------------------------------ viewer placement
+// ------------------------------------------------------------------ views + reference ("0 rotation")
+// When VR starts (or you recenter), your headset pose becomes the reference: looking straight ahead = the robot
+// looking to the FRONT. From then on the robot head follows your rotation RELATIVE to that reference, and the
+// world rides along with the robot so its forward stays in front of you.
+//   view "head"     first person at the head D435i (default)
+//   view "gripper"  first person at the gripper D405 (its own RGB-D surface)
+//   view "overview" behind and above the robot
+const VIEWS = ['head', 'gripper', 'overview'];
+const VIEW_NAMES = { head: 'Head camera (RealSense D435i)', gripper: 'Gripper camera (RealSense D405)', overview: 'Overview (behind Stretch)' };
 const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const ref = { yaw: 0, pitch: 0, pos: new THREE.Vector3(0, 1.6, 0), set: false };
+S.view = 'head';
 function viewerPose() {
   const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
   const p = new THREE.Vector3(), q = new THREE.Quaternion();
@@ -599,43 +660,61 @@ function viewerPose() {
   euler.setFromQuaternion(q, 'YXZ');
   return { p, yaw: euler.y, pitch: euler.x };
 }
-// Put the viewer at map point (mx, my) facing map heading psi (rad).
-function placeViewer(mx, my, psi) {
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+function setReference() {
   const v = viewerPose();
-  place.yaw = v.yaw - psi;
-  const p3 = new THREE.Vector3(mx, my, 0).applyMatrix4(new THREE.Matrix4().makeRotationY(place.yaw).multiply(M_MAP));
-  place.tx = v.p.x - p3.x; place.tz = v.p.z - p3.z;
+  ref.yaw = v.yaw; ref.pitch = v.pitch; ref.pos.copy(v.p); ref.set = true;
+  ui.rotation.y = ref.yaw;
+  gripView.position.copy(ref.pos); gripView.rotation.set(0, ref.yaw, 0);
+  placeStage(true);
+  sendLook(true);
+}
+// the map point that should sit at your reference pose, and the map heading that should face ref.yaw
+function anchor() {
+  const r = S.robot, [x, y, th] = (r && r.base) || [0, 0, 0];
+  const camZ = S.T ? S.T.elements[14] : 1.3;
+  if (S.view === 'overview') return { x: x - 1.7 * Math.cos(th), y: y - 1.7 * Math.sin(th), z: 1.9, psi: th };
+  return { x, y, z: camZ, psi: th };   // head (and gripper, for the hidden stage): at the head, facing the front
+}
+function placeStage(snapNow = false) {
+  const a = anchor();
+  const yaw = ref.yaw - a.psi;
+  const p3 = new THREE.Vector3(a.x, a.y, a.z).applyMatrix4(new THREE.Matrix4().makeRotationY(yaw).multiply(M_MAP));
+  const tx = ref.pos.x - p3.x, ty = ref.pos.y - p3.y, tz = ref.pos.z - p3.z;
+  const k = snapNow ? 1 : 0.12;   // smooth the ride-along (SLAM pose updates, base motion)
+  place.yaw += k * wrapPi(yaw - place.yaw);
+  place.tx += k * (tx - place.tx); place.ty += k * (ty - place.ty); place.tz += k * (tz - place.tz);
   updateStage();
-  ui.rotation.y = v.yaw;
 }
-// mode 0: "arm view" - stand at the mast facing the arm (hand forward = arm out); mode 1: robot head view
-function snap(mode) {
-  const r = S.robot, base = (r && r.base) || [0, 0, 0];
-  const [x, y, th] = base, c = Math.cos(th), s = Math.sin(th);
-  if (mode === 0) {
-    const ox = MAST[0] - 0.05, oy = MAST[1] + 0.35;   // just behind the mast, on the side opposite the arm
-    placeViewer(x + c * ox - s * oy, y + s * ox + c * oy, th - Math.PI / 2);
-  } else {
-    const T = S.T, hx = T ? T.elements[12] : x, hy = T ? T.elements[13] : y;
-    const fwd = T ? new THREE.Vector3(0, 0, 1).transformDirection(T) : new THREE.Vector3(c, s, 0);
-    placeViewer(hx, hy, Math.atan2(fwd.y, fwd.x));
-  }
-  S.viewMode = mode;
+function setView(v) {
+  S.view = v;
+  const grip = v === 'gripper';
+  aHead.visible = aMast.visible = v !== 'head';   // you ARE the head in this view
+  stage.visible = !grip;
+  gripView.visible = grip;
+  gripPanel.mesh.visible = !grip && !!gripPanel.tex.image;
+  placeStage(true);
+  toast(VIEW_NAMES[v]);
 }
+function nextView() { setView(VIEWS[(VIEWS.indexOf(S.view) + 1) % VIEWS.length]); }
+// gripper D405 as an immersive RGB-D surface locked to your reference frame (you "are" the gripper camera)
+const gripView = new THREE.Group(); gripView.visible = false; scene.add(gripView);
+let gripLive = null;
 
-// ------------------------------------------------------------------ head look (telepresence)
+// ------------------------------------------------------------------ head look (telepresence, relative)
 let lastLookSent = 0;
 function sendLook(force = false) {
   const now = performance.now();
   if (!force && now - lastLookSent < 100) return;
   lastLookSent = now;
-  const active = renderer.xr.isPresenting && S.headControl;
+  const active = renderer.xr.isPresenting && S.headControl && ref.set && S.view !== 'gripper';
   const { yaw, pitch } = viewerPose();
-  send({ type: 'look', yaw: yaw - place.yaw, pitch, active, frame: 'map' });  // gaze heading in the map frame
+  // 0, 0 = the robot head looks to the front; the robot adds your rotation since the reference
+  send({ type: 'look', yaw: wrapPi(yaw - ref.yaw), pitch: pitch - ref.pitch, active, frame: 'relative' });
 }
 
 // ------------------------------------------------------------------ expert teleop
-function claim() { send({ type: 'teleop_claim', pin: $('pin').value.trim() }); }
+function claim() { enableMic(); send({ type: 'teleop_claim', pin: $('pin').value.trim() }); }
 $('claim').onclick = claim;
 $('release').onclick = () => { send({ type: 'teleop_release' }); S.teleop = 'none'; S.teleopOn = false; updateTeleopUi(); };
 function updateTeleopUi(s) {
@@ -646,6 +725,12 @@ function updateTeleopUi(s) {
   $('tstate').style.color = st === 'granted' ? '#7fd07f' : '#eda100';
   $('release').style.display = st === 'granted' ? '' : 'none';
   $('claim').style.display = st === 'granted' ? 'none' : '';
+  $('talk').disabled = st !== 'granted';
+}
+function setTeleopOn(on) {
+  S.teleopOn = on;
+  send({ type: 'teleop_pause', paused: !on });
+  toast(on ? 'Expert control ON - the routine runs in the background' : 'Control paused - Stretch resumes its routine');
 }
 const inputs = { left: null, right: null };       // XRInputSource per hand
 const grips = [renderer.xr.getControllerGrip(0), renderer.xr.getControllerGrip(1)];
@@ -659,10 +744,14 @@ const handOf = {};
 });
 function sideIndex(side) { for (const i of [0, 1]) if (handOf[i] && handOf[i].handedness === side) return i; return -1; }
 const prevBtn = { left: [], right: [] };
-let leftGripSince = 0, lastTeleopSent = 0;
+let leftGripSince = 0, lastTeleopSent = 0, ySince = 0;
 const tmpM = new THREE.Matrix4(), tmpP = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpS = new THREE.Vector3();
-function toMap(objMatrixWorld) {
-  tmpM.copy(stage.matrix).invert().multiply(objMatrixWorld);
+const M_MAP_INV = M_MAP.clone().invert();
+// Hand pose in the ROBOT BASE frame (x forward, y left, z up): your reference forward = the robot's forward,
+// so "hand to the right" is the robot's right no matter how the world rides along.
+function toBase(objMatrixWorld) {
+  tmpM.copy(M_MAP_INV).multiply(new THREE.Matrix4().makeRotationY(-ref.yaw))
+    .multiply(new THREE.Matrix4().makeTranslation(-ref.pos.x, -ref.pos.y, -ref.pos.z)).multiply(objMatrixWorld);
   tmpM.decompose(tmpP, tmpQ, tmpS);
   return { p: [tmpP.x, tmpP.y, tmpP.z], q: [tmpQ.x, tmpQ.y, tmpQ.z, tmpQ.w] };
 }
@@ -671,11 +760,13 @@ function jointDist(hand, a, b) {
   if (!ja || !jb || !ja.visible || !jb.visible) return null;
   return ja.position.distanceTo(jb.position);
 }
+const clamp1 = (x) => Math.max(-1, Math.min(1, x));
 function pollInputs(now) {
   const session = renderer.xr.getSession();
   if (!session) return;
-  const cmd = { type: 'teleop', drive: [0, 0], clutch: false, precision: false, wrist: S.wrist, gripper: null, hand: null, mode: 'controllers' };
-  let haveRightCtl = false;
+  const cmd = { type: 'teleop', drive: [0, 0], clutch: false, precision: false, wrist: S.wrist, gripper: null,
+    hand: null, mode: 'controllers', frame: 'base' };
+  let haveRightCtl = false, ldrive = [0, 0], rdrive = [0, 0];
   for (const src of session.inputSources) {
     const side = src.handedness;
     if (side !== 'left' && side !== 'right') continue;
@@ -685,33 +776,39 @@ function pollInputs(now) {
     const prev = prevBtn[side] || [];
     const b = (i) => gp.buttons[i] && gp.buttons[i].pressed;
     const edge = (i) => b(i) && !prev[i];
+    const released = (i) => !b(i) && prev[i];
     if (side === 'left') {
-      cmd.drive = [-(gp.axes[3] || 0), -(gp.axes[2] || 0)];
-      if (edge(4)) { S.headControl = !S.headControl; sendLook(true); }     // X
-      if (edge(5)) setOverlay(!S.overlay);                                  // Y
-      if (edge(0)) snap(S.viewMode === 0 ? 1 : 0);                          // trigger
-      if (edge(3) && S.teleop === 'granted') S.teleopOn = !S.teleopOn;     // stick click
+      ldrive = [-(gp.axes[3] || 0), -(gp.axes[2] || 0)];                    // stick: drive
+      if (edge(4)) { S.headControl = !S.headControl; sendLook(true); toast(`Head follows you: ${S.headControl ? 'ON' : 'off'}`); } // X
+      if (edge(5)) ySince = now;                                            // Y: tap = next camera, hold = overlays
+      if (b(5) && ySince && now - ySince > 900) { setOverlay(!S.overlay); ySince = 0; }
+      if (released(5) && ySince) { nextView(); ySince = 0; }
+      if (edge(0)) pttStart();                                              // trigger: push-to-talk
+      if (released(0)) pttStop();
+      if (edge(3) && S.teleop === 'granted') setTeleopOn(!S.teleopOn);     // stick click
       if (b(1)) { if (!leftGripSince) leftGripSince = now; if (now - leftGripSince > 800) { ackAlarm(); leftGripSince = now + 1e9; } }
       else leftGripSince = 0;
     } else {
       haveRightCtl = true;
+      rdrive = [-(gp.axes[3] || 0), -(gp.axes[2] || 0)];                    // stick: fine drive (40 %)
       cmd.clutch = b(1);
       cmd.precision = gp.buttons[0] && gp.buttons[0].value > 0.5;
       if (edge(4)) cmd.gripper = 'open';                                    // A
       if (edge(5)) cmd.gripper = 'close';                                   // B
       if (edge(3)) { S.wrist = !S.wrist; cmd.wrist = S.wrist; }            // stick click
       const gi = sideIndex('right');
-      if (gi >= 0) cmd.hand = toMap(grips[gi].matrixWorld);
+      if (gi >= 0) cmd.hand = toBase(grips[gi].matrixWorld);
     }
     prevBtn[side] = gp.buttons.map((x) => x.pressed);
   }
+  cmd.drive = [clamp1(ldrive[0] + 0.4 * rdrive[0]), clamp1(ldrive[1] + 0.4 * rdrive[1])];
   if (!haveRightCtl) {   // bare hands: left pinch = clutch, right wrist = arm, right thumb-index = gripper
     const ri = sideIndex('right'), li = sideIndex('left');
     if (ri >= 0 && handOf[ri] && handOf[ri].hand) {
       const rh = hands[ri], wrist = rh.joints.wrist;
       if (wrist && wrist.visible) {
         cmd.mode = 'hands';
-        cmd.hand = toMap(wrist.matrixWorld);
+        cmd.hand = toBase(wrist.matrixWorld);
         const d = jointDist(rh, 'thumb-tip', 'index-finger-tip');
         if (d != null) cmd.aperture = THREE.MathUtils.clamp((d - 0.015) / 0.075, 0, 1);
       }
@@ -737,12 +834,105 @@ function hapticFeedback(h) {
   } catch (e) { /* not supported */ }
 }
 
+// ------------------------------------------------------------------ push-to-talk (Quest microphone -> Stretch)
+const mic = { stream: null, ctx: null, node: null, on: false, rate: 48000 };
+const WORKLET = `class Tap extends AudioWorkletProcessor { process(i) { if (i[0] && i[0][0]) this.port.postMessage(i[0][0].slice(0)); return true; } }
+registerProcessor('tap', Tap);`;
+async function enableMic() {
+  if (mic.stream) return true;
+  try {
+    mic.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+    mic.ctx = new AudioContext();
+    mic.rate = mic.ctx.sampleRate;
+    await mic.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
+    const src = mic.ctx.createMediaStreamSource(mic.stream);
+    mic.node = new AudioWorkletNode(mic.ctx, 'tap');
+    let acc = [];
+    mic.node.port.onmessage = (e) => {
+      if (!mic.on) return;
+      acc.push(e.data);
+      if (acc.reduce((n, a) => n + a.length, 0) >= mic.rate / 10) { sendAudio(acc); acc = []; }   // ~100 ms chunks
+    };
+    src.connect(mic.node);
+    $('mic').textContent = 'Mic ready'; $('mic').disabled = true;
+    return true;
+  } catch (e) {
+    toast(`Microphone unavailable: ${e.message || e}`);
+    return false;
+  }
+}
+function sendAudio(chunks) {   // resample to 16 kHz mono PCM16; message = [u8 10][pcm16 little-endian]
+  const n = chunks.reduce((k, a) => k + a.length, 0), all = new Float32Array(n);
+  let o = 0; for (const a of chunks) { all.set(a, o); o += a.length; }
+  const ratio = mic.rate / 16000, m = Math.floor((n - 1) / ratio);
+  const pkt = new Uint8Array(1 + 2 * m), dv = new DataView(pkt.buffer);
+  pkt[0] = 10;
+  for (let i = 0; i < m; i++) {
+    const x = i * ratio, j = Math.floor(x), f = x - j;
+    const v = all[j] * (1 - f) + all[j + 1] * f;
+    dv.setInt16(1 + 2 * i, Math.max(-32768, Math.min(32767, Math.round(v * 32767))), true);
+  }
+  if (ws && ws.readyState === 1) ws.send(pkt);
+}
+async function pttStart() {
+  if (S.teleop !== 'granted') { toast('Take control (PIN) to talk through Stretch'); return; }
+  if (!(await enableMic())) return;
+  if (mic.ctx.state === 'suspended') await mic.ctx.resume();
+  mic.on = true; S.voice = { state: 'listening' };
+  send({ type: 'ptt', state: 'start' });
+}
+function pttStop() {
+  if (!mic.on) return;
+  mic.on = false;
+  send({ type: 'ptt', state: 'stop' });
+}
+$('mic').onclick = enableMic;
+$('talk').addEventListener('pointerdown', pttStart);
+['pointerup', 'pointerleave'].forEach((ev) => $('talk').addEventListener(ev, pttStop));
+
+// ------------------------------------------------------------------ control-barrier lines (lidar obstacles)
+const barrierGroup = new THREE.Group(); stage.add(barrierGroup);
+const BARRIER_COLORS = { active: 0xd03b3b, near: 0xfab219, clear: 0x3987e5 };
+function applyBarriers(msg) {
+  for (const c of [...barrierGroup.children]) { barrierGroup.remove(c); c.geometry.dispose(); c.material.dispose(); }
+  for (const ln of msg.lines || []) {
+    const col = BARRIER_COLORS[ln.level] || 0x3987e5;
+    const op = ln.level === 'clear' ? 0.45 : 0.95;
+    for (const z of [0.03, 0.35]) {   // a low "fence": the keep-out line on the floor and at shin height
+      const pts = ln.pts.map((p) => new THREE.Vector3(p[0], p[1], z));
+      const Kind = ln.closed ? THREE.LineLoop : THREE.Line;
+      barrierGroup.add(new Kind(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op })));
+    }
+    const posts = [];
+    for (let i = 0; i < ln.pts.length; i += Math.max(1, Math.floor(ln.pts.length / 24))) {
+      posts.push(new THREE.Vector3(ln.pts[i][0], ln.pts[i][1], 0.03), new THREE.Vector3(ln.pts[i][0], ln.pts[i][1], 0.35));
+    }
+    barrierGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(posts),
+      new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op * 0.6 })));
+  }
+  if (msg.d && !footCircles.userData.d) {   // the footprint circles the barriers protect
+    footCircles.userData.d = msg.d;
+    for (const lx of [0.08, -0.08]) {
+      const pts = []; for (let i = 0; i <= 48; i++) { const a = i / 48 * 2 * Math.PI; pts.push(new THREE.Vector3(lx + 0.21 * Math.cos(a), 0.21 * Math.sin(a), 0.03)); }
+      footCircles.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x3987e5 })));
+    }
+  }
+  S.barriers = (msg.lines || []).length;
+  S.barrierActive = (msg.lines || []).some((l) => l.level === 'active');
+}
+const footCircles = new THREE.Group(); avatar.add(footCircles);
+
+// ------------------------------------------------------------------ toasts (2-D page + HUD)
+function toast(text) { S.toast = { text, t: performance.now() }; msg(text); }
+
 // ------------------------------------------------------------------ overlays / toggles
-function setOverlay(on) { S.overlay = on; heatGroup.visible = captionGroup.visible = on; $('overlay').checked = on; }
+function setOverlay(on) { S.overlay = on; heatGroup.visible = captionGroup.visible = barrierGroup.visible = on; $('overlay').checked = on; }
 $('overlay').onchange = (e) => setOverlay(e.target.checked);
 $('ceil').onchange = (e) => { mapMat.uniforms.ceilingOn.value = e.target.checked ? 1 : 0; };
+$('view').onclick = nextView;
 
-// desktop / 2-D preview: drag to look, WASD to walk, R to snap
+// desktop / 2-D preview: drag to look, WASD to walk, V = next camera, O = bird's-eye
 let drag = null;
 const keys = new Set();
 renderer.domElement.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
@@ -754,7 +944,9 @@ window.addEventListener('pointermove', (e) => {
   euler.y -= dx * 0.004; euler.x = THREE.MathUtils.clamp(euler.x - dy * 0.004, -1.4, 1.4);
   camera.quaternion.setFromEuler(euler);
 });
-function overview() {   // 2-D preview: bird's-eye view of the robot and the room
+let birdsEye = false;
+function overview() {   // 2-D preview only: bird's-eye view of the robot and the room (stops the ride-along)
+  birdsEye = true;
   const r = S.robot, [x, y] = (r && r.base) || [0, 0];
   const c = new THREE.Vector3(x, y, 0).applyMatrix4(stage.matrix);
   camera.position.set(c.x + 3.2, 4.2, c.z + 3.2);
@@ -763,8 +955,9 @@ function overview() {   // 2-D preview: bird's-eye view of the robot and the roo
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   const k = e.key.toLowerCase(); keys.add(k);
-  if (k === 'r') snap(S.viewMode === 0 ? 1 : 0);
+  if (k === 'v') nextView();
   if (k === 'o') overview();
+  if (k === 'c') { birdsEye = false; camera.position.copy(ref.pos); camera.quaternion.identity(); setReference(); }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 window.addEventListener('resize', () => {
@@ -787,6 +980,7 @@ renderer.setAnimationLoop((t) => {
     const xc = renderer.xr.getCamera();
     mapMat.uniforms.heightPx.value = (xc.cameras && xc.cameras[0] && xc.cameras[0].viewport) ? xc.cameras[0].viewport.w : 1800;
   } else mapMat.uniforms.heightPx.value = renderer.domElement.height;
+  if (ref.set && !birdsEye) placeStage();   // ride along with the robot
   pollInputs(now);
   sendLook();
   animateCaptions(t);
@@ -807,11 +1001,13 @@ async function setupVR() {
     const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking'] });
     await renderer.xr.setSession(session);
     btn.textContent = 'Exit VR';
-    session.addEventListener('end', () => { btn.textContent = 'Enter VR'; sendLook(true); });
-    setTimeout(() => snap(S.viewMode), 300);
+    ref.set = false;
+    session.addEventListener('end', () => { btn.textContent = 'Enter VR'; ref.set = false; sendLook(true); setTimeout(setReference, 100); });
+    // your pose a moment after entering = the robot's "0 rotation" (head looking to the front)
+    setTimeout(() => { setReference(); setView('head'); toast('Looking to the front: turn your head, Stretch follows'); }, 400);
   };
 }
 setOverlay(true);
 setupVR();
 connect();
-window.__vr = { S, stage, snap, overview, camera, applyMapDelta, slotOf };   // for debugging in the browser console
+window.__vr = { S, stage, overview, camera, applyMapDelta, slotOf, setView, nextView, setReference, ref };   // debugging

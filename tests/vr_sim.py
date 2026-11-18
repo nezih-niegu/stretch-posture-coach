@@ -183,7 +183,14 @@ def run(port: int = 8443, seconds: float | None = None, sessions="/tmp/vr-sim-se
     world.new_session(Path(sessions))
     vr = VRServer({**cfg["vr"], "teleop": cfg["teleop"]}, sessions, "/tmp/vr-sim-certs", cfg["thresholds"])
     vr.attach_world(world)
-    tele = TeleopController(cfg["teleop"], robot, world, vr)
+    from stretch_posture_coach.modes import Ev, Mode, ModeMachine
+    from stretch_posture_coach.vr import T_GRIPPER_RGBD, encode_rgbd_simple
+
+    fsm = ModeMachine(Mode.AUTONOMOUS)
+    fsm.dispatch(Ev.NEW_SESSION)
+    vr.status_provider = lambda: {"mode": fsm.status(), "survey": {"phase": "sweep", "step": 3, "steps": 10}}
+    tele = TeleopController(cfg["teleop"], robot, world, vr, allowed=lambda: fsm.mode == Mode.TELEOP)
+    gintr = Intrinsics.from_fov(212, 120, 87)
     tele.start()
     print(f"VR sim on https://127.0.0.1:{vr.port}/  teleop PIN {vr.pin}", flush=True)
     kin = HeadKinematics(1.3)
@@ -241,6 +248,20 @@ def run(port: int = 8443, seconds: float | None = None, sessions="/tmp/vr-sim-se
                     "world": world.status(),
                 },
             )
+            if k == int(4 * fps):
+                fsm.dispatch(Ev.SURVEY_DONE)
+            if vr.teleop_engaged and fsm.mode != Mode.TELEOP:
+                fsm.dispatch(Ev.TELEOP_ON)
+            if k % 2 == 0:  # simulated gripper D405 looking at the floor/table in front of the arm
+                x, y, th = robot.true
+                Tg = map_T_base(x, y, th) @ kin.base_T_cam(0.0, -0.9)
+                Tg[:3, 3] += [0.35 * math.cos(th), 0.35 * math.sin(th), -0.5]
+                gd, gc, _ = scene_synth.render(Tg, gintr, with_person=False)
+                gd[gd > 1.2] = 0
+                vr._on_aux(
+                    T_GRIPPER_RGBD,
+                    encode_rgbd_simple(T_GRIPPER_RGBD, gc, gd, gintr, 70, 2, 1.2, {"name": "gripper"}),
+                )
             k += 1
             time.sleep(max(0.0, 1.0 / fps - (time.monotonic() - t0 - t)))
     except KeyboardInterrupt:

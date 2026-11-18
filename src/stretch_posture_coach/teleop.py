@@ -11,12 +11,14 @@ Controls (VR page; the expert unlocks it with the PIN printed in the robot's log
                     thumbstick click = wrist following on/off
   left controller   thumbstick = drive: forward/back, left/right turns the base (Stretch is differential
                     drive - it can't strafe; move sideways by turning, driving, turning back)
+  right thumbstick  also drives (fine: 40 % speed)
   bare hands        right hand moves the arm while the LEFT hand pinches (clutch); right thumb-index distance
                     sets the gripper opening. No joystick and no vibration without controllers.
 
-Safety: one expert at a time (PIN), commands stop after 0.4 s without a fresh message, base velocity capped and
-re-checked by robot_helper (0.3 s watchdog), forward/backward driving slows and stops near obstacles in the
-lidar scan, runstop respected, arm/lift only when the robot is homed.
+Safety: only in mode TELEOP (modes.py), one expert at a time (PIN), commands stop after 0.4 s without a fresh
+message, base velocity capped and re-checked by robot_helper (0.3 s watchdog), every base command passes the
+Control-Barrier-Function filter built from the lidar scan (cbf.py) plus a hard emergency stop, runstop
+respected, arm/lift only when the robot is homed.
 """
 
 from __future__ import annotations
@@ -77,6 +79,7 @@ class TeleopCommand:
     gripper: str | None = None  # "open" | "close" (button edge) | None
     aperture: float | None = None  # bare hands: 0 closed .. 1 open
     mode: str = "controllers"
+    frame: str = "map"  # "base": hand pose already expressed in the robot base frame (VR ride-along views)
 
     @classmethod
     def from_msg(cls, m: dict, now: float) -> TeleopCommand:
@@ -96,6 +99,7 @@ class TeleopCommand:
             gripper=m.get("gripper") if m.get("gripper") in ("open", "close") else None,
             aperture=None if ap is None else float(np.clip(ap, 0, 1)),
             mode=str(m.get("mode", "controllers")),
+            frame="base" if m.get("frame") == "base" else "map",
         )
 
 
@@ -171,8 +175,8 @@ class LidarGuard:
         self.enabled = bool(c.get("lidar_guard", True))
         self.half_len = float(c.get("footprint_half_length_m", 0.20))
         self.half_w = float(c.get("footprint_half_width_m", 0.20)) + 0.05
-        self.stop = float(c.get("stop_distance_m", 0.30))
-        self.slow = float(c.get("slow_distance_m", 0.60))
+        self.stop = float(c.get("stop_distance_m", 0.12))  # emergency layer under the CBF filter
+        self.slow = float(c.get("slow_distance_m", 0.05))
 
     def __call__(self, v: float, pts: np.ndarray | None) -> tuple[float, str]:
         if not self.enabled or abs(v) < 1e-6 or pts is None or not len(pts):
@@ -220,8 +224,9 @@ class Haptics:
 class TeleopController(threading.Thread):
     """20 Hz loop: VR command -> base velocity / joint targets / gripper; robot effort -> haptics."""
 
-    def __init__(self, cfg: dict, robot, world=None, server=None):
+    def __init__(self, cfg: dict, robot, world=None, server=None, allowed=None):
         super().__init__(daemon=True, name="teleop")
+        self.allowed = allowed or (lambda: True)  # e.g. lambda: fsm.mode == Mode.TELEOP
         self.c = cfg
         self.robot, self.world, self.server = robot, world, server
         self.mapper = TeleopMapper(cfg)
@@ -242,7 +247,7 @@ class TeleopController(threading.Thread):
     def step(self, cmd: TeleopCommand | None, now: float) -> dict:
         """One control cycle (public for tests)."""
         r = self.robot
-        fresh = cmd is not None and now - cmd.t <= self.timeout
+        fresh = cmd is not None and now - cmd.t <= self.timeout and self.allowed()
         if not fresh:
             if self.active:
                 log.info("teleop: no fresh command - holding")
@@ -263,6 +268,12 @@ class TeleopController(threading.Thread):
         pts = None
         if self.world is not None and getattr(self.world, "lidar_ok", False):
             pts = self.world.loc.latest_points
+        cbf = None
+        if pts is not None and getattr(self.world, "cbf", None) is not None and (v or w):
+            cbf = self.world.cbf.filter(v, w, pts)  # minimal change that keeps every lidar barrier h >= 0
+            if cbf.modified:
+                notes.append(f"barrier: {cbf.v_ref:.2f}->{cbf.v:.2f} m/s, {cbf.w_ref:.2f}->{cbf.w:.2f} rad/s")
+            v, w = cbf.v, cbf.w
         v, gnote = self.guard(v, pts)
         if gnote:
             notes.append(gnote)
@@ -273,7 +284,7 @@ class TeleopController(threading.Thread):
         joints = dict(getattr(r, "joints", {}) or {})
         homed = getattr(r, "homed", None)
         theta = 0.0
-        if self.world is not None:
+        if self.world is not None and cmd.frame != "base":
             theta = float(self.world.base_pose()[2])
         targets = None
         if cmd.clutch and getattr(r, "has_arm", False) and homed is False:
@@ -303,6 +314,7 @@ class TeleopController(threading.Thread):
             "targets": targets,
             "haptics": hap,
             "mode": cmd.mode,
+            "barrier": None if cbf is None else {"active": len(cbf.active), "h_min": cbf.h_min},
         }
         return self.state
 

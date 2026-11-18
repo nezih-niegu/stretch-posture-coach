@@ -94,6 +94,39 @@ robot:
   tilt_sign: -1            # flip to +1 if the head tilts the wrong way
   hfov_deg: 42             # horizontal FOV of the (rotated) head camera image
   vfov_deg: 69
+  front_tilt_rad: -0.15    # "looking to the front": head tilt at start, after the survey, and VR look zero
+                           # (the front pan is follow.forward_pan_rad)
+
+# 360° survey at the start of EVERY session (mode SURVEY): new lidar SLAM map, floor-plane recalibration,
+# head sweep of the room, optional base spin guarded by the control barrier functions. Then coaching starts.
+survey:
+  enabled: true
+  pan_min_rad: -3.9        # head sweep range (Stretch head pan is about -4.0 .. 1.9 rad)
+  pan_max_rad: 1.6
+  steps: 10
+  tilt_rad: -0.55          # looking down enough to see the floor (floor-plane calibration)
+  dwell_s: 1.2             # pause at each step (keyframes land in the map)
+  settle_s: 1.5
+  rotate_base: auto        # auto = spin 360° only if a lidar is present and the barriers allow it | true | false
+  spin_step_deg: 30
+  spin_dwell_s: 2.8
+  min_voxels: 1500         # survey "OK" needs this much mapped room
+  timeout_s: 90
+
+# Control Barrier Functions for the mobile base: every lidar return is a barrier h = |c - o|^2 - d^2 on two
+# circles covering the footprint; base commands (expert joysticks, follow steps, survey spin) are minimally
+# changed so that dh/dt >= -alpha * h (smooth stop at the barrier, turning away / backing off stays free).
+# The keep-out lines (h = 0) are drawn in the VR scene.
+safety:
+  enabled: true
+  circle_offset_m: 0.08    # footprint circles at +-0.08 m along the base axis ...
+  circle_radius_m: 0.21    # ... with this radius
+  margin_m: 0.20           # extra clearance to any obstacle (d = radius + margin)
+  alpha: 1.5               # 1/s: how fast the robot may approach a barrier (smaller = more cautious)
+  turn_weight: 0.15        # the filter prefers changing the turn rate over the speed
+  range_m: 2.5             # obstacles considered
+  cell_m: 0.08
+  max_constraints: 24
 
 # Follow mode: Stretch turns its body to face you and keeps a safe distance using the mobile base.
 # OFF by default; enable with `posture-coach follow` or `posture-coach run --follow`.
@@ -216,11 +249,24 @@ teleop:
   gripper_effort_full: 60  # ... and at a firm grasp -> full vibration
   arm_effort_free: 25      # lift / arm effort (%) -> vibration on contact
   arm_effort_full: 70
-  lidar_guard: true        # slow down / stop driving toward obstacles seen by the lidar
+  lidar_guard: true        # emergency stop layer under the CBF filter (safety:)
   footprint_half_length_m: 0.20
   footprint_half_width_m: 0.20
-  stop_distance_m: 0.30
-  slow_distance_m: 0.60
+  stop_distance_m: 0.12
+  slow_distance_m: 0.05
+
+# Talk through Stretch from the headset: hold the LEFT TRIGGER (push-to-talk) -> offline speech-to-text
+# (faster-whisper) -> the LLM turns the expert's words into what Stretch says (persona + language) -> the
+# robot's voice. Expert (PIN) only.
+voice:
+  enabled: true
+  mode: relay              # relay = through the LLM | verbatim = speak the transcript as said
+  stt_model: base          # tiny | base | small (better Spanish, ~2x slower) | medium
+  language: auto           # auto = from the persona (es / en)
+  threads: 4
+  partial_every_s: 1.0     # live transcript in the headset while talking
+  max_utterance_s: 30
+  max_tokens: 90
 
 # VR telepresence for the Meta Quest browser: https://<robot>:8443/  (accept the certificate warning once)
 vr:
@@ -246,6 +292,10 @@ vr:
   nav_vfov_deg: 90
   nav_width: 800
   nav_height: 600
+  look_yaw_sign: 1         # VR head following: your rotation since entering VR is added to the robot's "front"
+  look_pitch_sign: 1       # (front = follow.forward_pan_rad, robot.front_tilt_rad); flip a sign if it's reversed
+  gripper_depth: true      # gripper D405 as RGB-D (immersive gripper view); false = color panel only
+  gripper_max_range_m: 0.8
   map_hz: 2                # RGB-D frames fused into the registered room scan per second
   map_voxel_m: 0.05
   map_stride: 4            # use every 4th depth pixel (160x120 from 640x480)

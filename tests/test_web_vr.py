@@ -198,6 +198,7 @@ def test_pipeline_vr_look_control_pauses_follow(tmp_path):
         overrides={
             "logging": {"enabled": False},
             "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "follow": {"enabled": True},
             "coach": {"greet": False},
             "vr": {
@@ -228,7 +229,10 @@ def test_pipeline_vr_look_control_pauses_follow(tmp_path):
     assert p.vr is not None
     p.vr._look = {"yaw": 0.4, "pitch": -0.2, "active": True, "t": time.monotonic() + 1e6}  # VR viewer looking
     p.run()
-    assert looks and looks[-1] == (pytest.approx(0.4), pytest.approx(-0.2))
+    # the head starts at the front (forward_pan, front_tilt), then follows the headset RELATIVE to that
+    front = (cfg["follow"]["forward_pan_rad"], cfg["robot"]["front_tilt_rad"])
+    assert looks[0] == (pytest.approx(front[0]), pytest.approx(front[1]))
+    assert looks[-1] == (pytest.approx(front[0] + 0.4), pytest.approx(front[1] - 0.2))
     assert not head.translations and not head.rotations  # ...but never drives while someone is in VR
     assert p.follow_state.action == "paused"
 
@@ -290,6 +294,7 @@ def test_session_end_serves_report_on_both_servers(tmp_path):
         overrides={
             "logging": {"sessions_dir": str(tmp_path / "sessions")},
             "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "coach": {"greet": False},
             "display": {"stream_port": 0, "stream_host": "127.0.0.1"},
             "vr": {
@@ -340,6 +345,7 @@ def test_end_session_button_rotates_and_builds_report(tmp_path):
         overrides={
             "logging": {"sessions_dir": str(tmp_path / "sessions")},
             "analysis": {"calibration_file": str(tmp_path / "c.json")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "coach": {"greet": False},
             "display": {"stream_port": 0, "stream_host": "127.0.0.1"},
         }

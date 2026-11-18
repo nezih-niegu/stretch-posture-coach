@@ -250,11 +250,10 @@ def test_lidar_guard_and_haptics():
 
     g = LidarGuard({})
     wall_ahead = lambda d: np.array([[d, y] for y in np.linspace(-0.3, 0.3, 13)])  # noqa: E731
-    assert g(0.2, wall_ahead(2.0))[0] == pytest.approx(0.2)
-    v, note = g(0.2, wall_ahead(0.80))
-    assert 0 < v < 0.2 and "slowing" in note
-    assert g(0.2, wall_ahead(0.45)) == (0.0, pytest.approx("obstacle 0.25 m ahead: stopped"))
-    assert g(-0.2, wall_ahead(0.45))[0] == pytest.approx(-0.2)  # backing away is fine
+    # emergency layer only (the CBF filter does the smooth slowing): untouched until 0.12 m from the footprint
+    assert g(0.2, wall_ahead(0.80))[0] == pytest.approx(0.2)
+    assert g(0.2, wall_ahead(0.30)) == (0.0, pytest.approx("obstacle 0.10 m ahead: stopped"))
+    assert g(-0.2, wall_ahead(0.30))[0] == pytest.approx(-0.2)  # backing away is fine
     h = Haptics({})
     assert h({"gripper_effort": 3})["gripper"] == 0
     first = h({"gripper_effort": 40})

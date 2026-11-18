@@ -17,8 +17,12 @@ Wire format (WebSocket, little-endian), server -> client:
                                             type 4 = map delta: [...][i16 voxel idx n*3][u8 rgb n*3][i16 del m*3]
                                             type 5 = lidar scan: [...][f32 map xy n*2]
                                             type 6 = occupancy grid: [...][png]
+                                            type 7 = gripper D405 RGB-D (same layout as type 1)
   text    {"type": "state" | "alarm" | "report" | "captions" | "heat" | "teleop" | "teleop_fb", ...}
-client -> server (text): {"type": "look", "yaw": rad, "pitch": rad, "active": bool}
+client -> server (text): {"type": "look", "yaw": rad, "pitch": rad, "active": bool}   RELATIVE to the headset
+                         orientation when VR started (or was recentered): 0, 0 = the robot head looks to the front
+                         {"type": "teleop_pause", "paused": bool}  {"type": "ptt", "state": "start" | "stop"}
+                binary:  [u8 10][pcm16 16 kHz mono]   push-to-talk audio (expert only)
                          {"type": "ack", "t": msg_type}                after each binary message is applied
                          {"type": "teleop_claim", "pin": "123456"} / {"type": "teleop_release"}
                          {"type": "teleop", "drive": [fwd, turn], "hand": {"p": [x,y,z], "q": [x,y,z,w]},
@@ -52,8 +56,9 @@ from .camera import Intrinsics
 
 log = logging.getLogger(__name__)
 
-T_RGBD, T_GRIPPER, T_NAV, T_MAP, T_LIDAR, T_OCC = 1, 2, 3, 4, 5, 6
-MAX_IN_FLIGHT = {T_RGBD: 2, T_GRIPPER: 1, T_NAV: 1, T_MAP: 1, T_LIDAR: 1, T_OCC: 1}
+T_RGBD, T_GRIPPER, T_NAV, T_MAP, T_LIDAR, T_OCC, T_GRIPPER_RGBD = 1, 2, 3, 4, 5, 6, 7
+T_AUDIO_IN = 10  # client -> server: push-to-talk PCM16 16 kHz mono
+MAX_IN_FLIGHT = {T_RGBD: 2, T_GRIPPER: 1, T_NAV: 1, T_MAP: 1, T_LIDAR: 1, T_OCC: 1, T_GRIPPER_RGBD: 1}
 ACK_TIMEOUT_S = 3.0
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -81,6 +86,25 @@ def clean_depth_mm(depth_m: np.ndarray, dw: int, dh: int, max_range_m: float = 4
     d[flying] = 0
     d[d > int(max_range_m * 1000)] = 0
     return d.astype("<u2")
+
+
+def encode_rgbd_simple(t, frame, depth_m, intr, quality=70, decim=2, max_range=0.8, extra=None) -> bytes:
+    """Color + depth in the type-1 layout (used for the gripper D405)."""
+    h, w = frame.shape[:2]
+    ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    dw, dh = max(2, w // decim), max(2, h // decim)
+    dmm = clean_depth_mm(depth_m, dw, dh, max_range)
+    meta = {
+        "w": w,
+        "h": h,
+        "dw": dw,
+        "dh": dh,
+        "has_depth": True,
+        "max_range": max_range,
+        "intr": [intr.fx / intr.w, intr.fy / intr.h, (intr.cx + 0.5) / intr.w, (intr.cy + 0.5) / intr.h],
+        **(extra or {}),
+    }
+    return pack(t, meta, jpg.tobytes(), dmm.tobytes(), length_prefixed=1)
 
 
 def pack(msg_type: int, meta: dict, *chunks: bytes, length_prefixed: int = 0) -> bytes:
@@ -228,7 +252,11 @@ class AuxCamera(threading.Thread):
             )
 
     def _run_realsense(self):
+        """Gripper D405: color + aligned depth -> type 7 (RGB-D, viewable as an immersive 3-D view in the
+        headset), or color only (type 2) if depth can't be started."""
         import pyrealsense2 as rs
+
+        from .camera import Intrinsics, rotate_intrinsics
 
         want = str(self.cfg.get("gripper_name", "D405"))
         devs = [
@@ -238,22 +266,72 @@ class AuxCamera(threading.Thread):
         match = [d for d in devs if want.lower() in d[0].lower()]
         if not match:
             raise RuntimeError(f"no RealSense matching {want!r} (found {devs})")
+        W, H = int(self.cfg.get("gripper_width", 424)), int(self.cfg.get("gripper_height", 240))
         pipe, c = rs.pipeline(), rs.config()
         c.enable_device(match[0][1])
-        c.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 15)
-        pipe.start(c)
-        log.info("VR: gripper camera %s streaming", match[0][0])
+        c.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 15)
+        use_depth = bool(self.cfg.get("gripper_depth", True))
+        if use_depth:
+            c.enable_stream(rs.stream.depth, W, H, rs.format.z16, 15)
+        try:
+            prof = pipe.start(c)
+        except RuntimeError:
+            if not use_depth:
+                raise
+            use_depth = False
+            c = rs.config()
+            c.enable_device(match[0][1])
+            c.enable_stream(rs.stream.color, W, H, rs.format.bgr8, 15)
+            prof = pipe.start(c)
+        align = rs.align(rs.stream.color) if use_depth else None
+        scale = prof.get_device().first_depth_sensor().get_depth_scale() if use_depth else 0.0
+        ci = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        rot = str(self.cfg.get("gripper_rotate", "none"))
+        intr = rotate_intrinsics(Intrinsics(ci.fx, ci.fy, ci.ppx, ci.ppy, ci.width, ci.height), rot)
+        log.info("VR: gripper camera %s streaming (%s)", match[0][0], "RGB-D" if use_depth else "color")
         period = 1.0 / float(self.cfg.get("aux_fps", 10))
         last = 0.0
         try:
             while self.running:
                 frames = pipe.wait_for_frames(timeout_ms=5000)
+                if time.monotonic() - last < period:
+                    continue
+                if align is not None:
+                    frames = align.process(frames)
                 col = frames.get_color_frame()
-                if col and time.monotonic() - last >= period:
-                    last = time.monotonic()
-                    self._emit(np.asanyarray(col.get_data()), {"name": "gripper"})
+                if not col:
+                    continue
+                last = time.monotonic()
+                img = np.asanyarray(col.get_data())
+                dep = frames.get_depth_frame() if align is not None else None
+                if dep:
+                    self._emit_rgbd(img, np.asanyarray(dep.get_data()).astype(np.float32) * scale, intr, rot)
+                else:
+                    self._emit(img, {"name": "gripper"})
         finally:
             pipe.stop()
+
+    def _emit_rgbd(self, frame, depth_m, intr, rot: str):
+        r = {
+            "cw90": cv2.ROTATE_90_CLOCKWISE,
+            "ccw90": cv2.ROTATE_90_COUNTERCLOCKWISE,
+            "180": cv2.ROTATE_180,
+        }.get(rot)
+        if r is not None:
+            frame, depth_m = cv2.rotate(frame, r), cv2.rotate(depth_m, r)
+        self.on_frame(
+            T_GRIPPER_RGBD,
+            encode_rgbd_simple(
+                T_GRIPPER_RGBD,
+                frame,
+                depth_m,
+                intr,
+                int(self.cfg.get("jpeg_quality", 70)),
+                int(self.cfg.get("gripper_decimation", 2)),
+                float(self.cfg.get("gripper_max_range_m", 0.8)),
+                {"name": "gripper"},
+            ),
+        )
 
     def _run_v4l2(self):
         dev = self.cfg.get("nav_camera", "auto")
@@ -298,6 +376,8 @@ class _Client:
     lidar_sent: float = 0.0
     occ_version: int = -1
     occ_sent: float = 0.0
+    status_sent: float = 0.0
+    barriers_sent: float = 0.0
     captions_version: int = -1
     heat_version: int = -1
     heat_sent: float = 0.0
@@ -348,6 +428,9 @@ class VRServer:
         self._teleop_fb: dict = {}
         self._pin_fails = 0
         self._pin_locked_until = 0.0
+        self._teleop_paused = False
+        self.on_voice = None  # VoiceRelay: begin() / feed(bytes) / end()
+        self.status_provider = None  # () -> dict: mode / survey status for the HUD
 
         self._ssl = None
         if self.scheme == "https":
@@ -421,6 +504,29 @@ class VRServer:
     @property
     def teleop_owner_connected(self) -> bool:
         return self._teleop_owner is not None and self._teleop_owner in self._clients
+
+    @property
+    def teleop_engaged(self) -> bool:
+        """An authenticated expert is connected and has not paused control -> mode TELEOP."""
+        return self.teleop_owner_connected and not self._teleop_paused
+
+    def voice_notify(self, msg: dict) -> None:
+        """Thread-safe: send a voice status / transcript to the expert's headset."""
+        owner = self._teleop_owner
+        if owner is None or not self._running:
+            return
+        data = json.dumps(msg)
+
+        async def _send():
+            try:
+                await owner.conn.send(data)
+            except Exception:
+                pass
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), self.loop)
+        except RuntimeError:
+            pass
 
     def teleop_command(self):
         """Latest command from the expert (with a latched gripper button press), or None."""
@@ -643,6 +749,10 @@ class VRServer:
         sender = asyncio.ensure_future(self._sender(client))
         try:
             async for msg in conn:
+                if isinstance(msg, bytes):
+                    if msg[:1] == bytes([T_AUDIO_IN]) and client is self._teleop_owner and self.on_voice:
+                        self.on_voice.feed(msg[1:])
+                    continue
                 if isinstance(msg, str):
                     try:
                         m = json.loads(msg)
@@ -663,6 +773,26 @@ class VRServer:
                         client.event.set()
                     elif m.get("type") == "teleop_claim":
                         await conn.send(json.dumps(self._claim(client, m.get("pin", ""))))
+                    elif m.get("type") == "teleop_pause":
+                        if self._teleop_owner is client:
+                            self._teleop_paused = bool(m.get("paused"))
+                            self._teleop_cmd = None
+                            log.info("VR: expert %s control", "paused" if self._teleop_paused else "resumed")
+                    elif m.get("type") == "ptt":
+                        if self._teleop_owner is not client or self.on_voice is None:
+                            await conn.send(
+                                json.dumps(
+                                    {
+                                        "type": "voice",
+                                        "state": "idle",
+                                        "error": "take control (PIN) to talk through Stretch",
+                                    }
+                                )
+                            )
+                        elif m.get("state") == "start":
+                            self.on_voice.begin()
+                        else:
+                            self.on_voice.end()
                     elif m.get("type") == "teleop_release":
                         if self._teleop_owner is client:
                             self._teleop_owner, self._teleop_cmd = None, None
@@ -689,6 +819,8 @@ class VRServer:
             self._clients.discard(client)
             if self._teleop_owner is client:
                 self._teleop_owner, self._teleop_cmd = None, None
+                if self.on_voice is not None:
+                    self.on_voice.end()
                 log.info("VR: expert disconnected - teleop stopped")
             if not self._clients:
                 self._look = None
@@ -714,7 +846,7 @@ class VRServer:
         ):
             return {"type": "teleop", "state": "busy"}
         self._pin_fails = 0
-        self._teleop_owner, self._teleop_cmd = client, None
+        self._teleop_owner, self._teleop_cmd, self._teleop_paused = client, None, False
         log.info("VR: expert teleop granted")
         return {"type": "teleop", "state": "granted"}
 
@@ -726,8 +858,18 @@ class VRServer:
         if client is self._teleop_owner and self._teleop_fb and now - client.fb_sent > 0.066:
             client.fb_sent = now  # ~15 Hz haptics / status for the expert
             await conn.send(json.dumps({"type": "teleop_fb", **self._teleop_fb}, default=float))
+        if self.status_provider is not None and now - client.status_sent > 0.5:
+            client.status_sent = now
+            try:
+                await conn.send(json.dumps({"type": "status", **self.status_provider()}, default=float))
+            except Exception as e:
+                log.debug("status: %s", e)
         if w is None:
             return
+        if w.lidar_ok and now - client.barriers_sent > 0.4:
+            client.barriers_sent = now
+            lines = await asyncio.get_running_loop().run_in_executor(None, w.barrier_lines)
+            await conn.send(json.dumps({"type": "barriers", "lines": lines, "d": w.cbf.d}))
         if w.captions_version != client.captions_version:
             client.captions_version = w.captions_version
             await conn.send(json.dumps({"type": "captions", "items": w.captions}, default=float))

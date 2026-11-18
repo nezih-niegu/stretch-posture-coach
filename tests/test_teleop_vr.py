@@ -118,7 +118,8 @@ def test_vr_streams_registered_world(tmp_path):
         async with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=_ctx(), max_size=None) as ws:
             end = time.monotonic() + 15
             k = 0
-            while time.monotonic() < end and not {T_MAP, T_LIDAR, T_OCC, "captions", "heat", 1} <= set(got):
+            want = {T_MAP, T_LIDAR, T_OCC, "captions", "heat", "barriers", 1}
+            while time.monotonic() < end and not want <= set(got):
                 robot._pan = -0.4 + 0.1 * (k % 9)
                 person_at(1.9, 0.1)
                 color, depth, pose = frame_at(robot, kin, intr, k)
@@ -146,6 +147,10 @@ def test_vr_streams_registered_world(tmp_path):
                     continue
                 if isinstance(m, str):
                     j = json.loads(m)
+                    if (j["type"] == "captions" and not j["items"]) or (
+                        j["type"] == "barriers" and not j["lines"]
+                    ):
+                        continue  # the initial (empty) lists, before any event / lidar scan
                     got[j["type"]] = j
                 else:
                     t, meta, rest = unpack(m)
@@ -166,6 +171,8 @@ def test_vr_streams_registered_world(tmp_path):
     assert got["captions"]["items"][0]["kind"] == "fall_check"
     assert got["heat"]["legend"]["colors"][1] == "#383835"
     assert len(got[1][0]["T"]) == 16
+    lines = got["barriers"]["lines"]  # CBF keep-out lines around the walls the lidar sees
+    assert lines and all(len(ln["pts"]) >= 3 for ln in lines) and got["barriers"]["d"] > 0.3
 
 
 FAKE_STRETCH_BODY = {

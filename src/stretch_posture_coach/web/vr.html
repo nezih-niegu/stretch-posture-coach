@@ -36,18 +36,22 @@
     placeholder="PIN"> <button id="claim" class="small">Take control</button>
     <button id="release" class="small" style="display:none;background:#555">Release</button>
     <span id="tstate"></span></span>
+  <button id="view" class="small" style="background:#3a3f4a">Switch camera</button>
+  <button id="mic" class="small" style="background:#3a3f4a">Enable mic</button>
+  <button id="talk" class="small" disabled>Hold to talk</button> <span id="vstate" style="font-size:14px"></span>
   <label><input type="checkbox" id="livebg"> live depth for everything</label>
   <label><input type="checkbox" id="ceil" checked> hide ceiling</label>
   <label><input type="checkbox" id="overlay" checked> heat map + captions</label>
 </div>
 <div id="alarm"><b id="atitle"></b> <span id="areason"></span>
   <button id="ack">I'm OK / acknowledge</button></div>
-<div id="help"><b>2-D preview:</b> drag = look, W A S D = walk, R = snap to the robot, O = overview.
-  <b>In VR:</b> left trigger = snap to the robot (arm view ↔ head view) · X = robot head follows your head ·
-  Y = heat map + captions · hold left grip = acknowledge a fall alarm.
-  <b>Expert control</b> (PIN): right GRIP held = arm follows your hand (up/down = lift, along the arm = extend,
-  turn/tilt/roll = wrist) · right trigger = precision · A = open, B = close gripper (vibrates with grip force) ·
-  right stick click = wrist on/off · left stick = drive forward/back and turn · left stick click = pause control.
+<div id="help"><b>2-D preview:</b> drag = look, W A S D = walk, V = switch camera, O = bird's-eye, C = back to the robot.
+  <b>In VR</b> your pose when you enter = the robot looking to the FRONT; turn your head and Stretch's head turns the
+  same amount. <b>Left:</b> stick = drive · stick click = pause/resume control · X = head follows you ·
+  Y = switch camera (head D435i → gripper D405 → overview; hold = heat map/captions/barriers) ·
+  trigger (hold) = talk through Stretch · grip (hold) = acknowledge a fall alarm.
+  <b>Right:</b> grip (hold) = arm follows your hand · trigger = precision · A/B = open/close gripper (vibrates with
+  grip force) · stick = fine drive · stick click = wrist on/off.
   Bare hands: pinch with the left hand to move the arm with the right; right thumb–index sets the gripper.</div>
 <script type="module" src="/vr.js"></script>
 </body>

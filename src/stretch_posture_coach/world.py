@@ -196,6 +196,19 @@ class LiveMap:
             "del": np.clip(dk, -32768, 32767).astype("<i2"),
         }
 
+    def clear(self) -> None:
+        """Forget everything (new survey). Connected headsets get a full (empty) snapshot next."""
+        with self.lock:
+            self.keys = np.zeros(0, np.int64)
+            self.csum = np.zeros((0, 3), np.float32)
+            self.ccount = np.zeros(0, np.float32)
+            self.hits = np.zeros(0, np.float32)
+            self.ver = np.zeros(0, np.int64)
+            self.shown = np.zeros(0, bool)
+            self.version += 1
+            self.oldest_delta = self.version
+            self._deleted = []
+
     def snapshot(self) -> tuple[np.ndarray, np.ndarray]:
         with self.lock:
             c = (_unpack(self.keys[self.shown]) + 0.5) * self.voxel
@@ -236,6 +249,9 @@ class LiveWorld:
         self.max_range = float(vc.get("max_range_m", 4.5))
         self.person_radius = float(vc.get("map_person_radius_m", 0.3))
         self.heat = HeatGrid(float(vc.get("heat_cell_m", 0.25)))
+        from .cbf import CBFSafety
+
+        self.cbf = CBFSafety(cfg.get("safety", {}))
         self.captions: list[dict] = []
         self.captions_version = 0
         self._caption_id = 0
@@ -337,6 +353,24 @@ class LiveWorld:
         if person is not None and self.person_radius > 0:
             self.map.remove_column(person[0], person[1], self.person_radius)
 
+    def reset_registration(self) -> None:
+        """Start a fresh map frame: new lidar SLAM map (map = base frame now), empty voxel map, and the floor
+        correction re-measured from scratch. Called by the 360° survey at the start of every session."""
+        from .slam2d import Localizer
+
+        old = self.loc
+        self.loc = Localizer(self.cfg.get("lidar", {}))
+        self.loc.enabled = old.enabled
+        with self.aligner.lock:
+            self.aligner.n = 0
+        self.map.clear()
+        try:
+            while True:
+                self._q.get_nowait()
+        except queue.Empty:
+            pass
+        log.info("registration reset: new map frame, floor correction will be re-measured")
+
     # ---------------------------------------------------------------- events -> captions
     def event(self, ev: dict, metrics: dict | None = None) -> dict | None:
         kind = ev.get("kind")
@@ -418,6 +452,15 @@ class LiveWorld:
             (d / "occupancy.json").write_text(json.dumps({**meta, **self.loc.status()}), encoding="utf-8")
         except Exception as e:
             log.debug("save occupancy: %s", e)
+
+    def obstacle_points(self):
+        """Latest lidar scan in the base frame (None without a lidar)."""
+        return self.loc.latest_points if self.loc.enabled else None
+
+    def barrier_lines(self) -> list[dict]:
+        if not self.loc.enabled:
+            return []
+        return self.cbf.barrier_lines(self.loc.latest_points, self.loc.pose(self.odom()))
 
     def status(self) -> dict:
         return {"lidar": self.loc.status(), "floor": self.aligner.status(), "map_voxels": len(self.map)}

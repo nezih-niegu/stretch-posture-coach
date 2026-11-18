@@ -198,6 +198,7 @@ def test_pipeline_fall_end_to_end(tmp_path):
         overrides={
             "logging": {"sessions_dir": str(tmp_path / "s")},
             "analysis": {"calibration_file": str(tmp_path / "c")},
+            "survey": {"enabled": False},  # tested in test_modes.py
             "coach": {"greet": False, "persona": "norteno"},
             "alarm": {"siren": False, "repeat_s": 0.2},
             "follow": {"enabled": True},
@@ -291,6 +292,7 @@ def _pipeline(tmp_path, script, depth=2.5, **over):
     base = {
         "logging": {"sessions_dir": str(tmp_path / "s")},
         "analysis": {"calibration_file": str(tmp_path / "c")},
+        "survey": {"enabled": False},  # tested in test_modes.py
         "coach": {"greet": False, "min_interval_s": 3},
         "alarm": {"siren": False, "repeat_s": 0.2},
         "thresholds": {"hold_s": 2},
